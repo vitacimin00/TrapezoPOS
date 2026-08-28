@@ -35,6 +35,7 @@ class CheckoutConcurrencyTest {
     @After fun tearDown() { db.close() }
 
     private suspend fun openShift() = TestDb.shifts(db).open(admin, 100_000L).let { (it as com.trapezo.pos.data.repository.ShiftRepository.Result.Ok).shift }
+    private fun scalar(sql: String): Long = db.openHelper.readableDatabase.query(sql).use { c -> c.moveToFirst(); c.getLong(0) }
 
     @Test fun concurrentCheckout_onlyOneSucceedsForLastStock() {
         runBlocking {
@@ -51,10 +52,20 @@ class CheckoutConcurrencyTest {
                 async { sales.checkout(listOf(line), OrderDiscount(), linkedMapOf("CASH" to 10_000L), emptyMap(), admin, shift.id, null, null) }
             ).awaitAll()
         }
-        val success = results.count { it is SalesRepository.CheckoutResult.Success }
-        assertEquals(1, success)
+        val successes = results.filterIsInstance<SalesRepository.CheckoutResult.Success>()
+        val failures = results.filterIsInstance<SalesRepository.CheckoutResult.Failure>()
+        assertEquals(1, successes.size)
+        assertEquals(1, failures.size)
         assertEquals(0L, db.productDao().stockOf(saved.id))
-        assertEquals(1, db.saleDao().itemsFor(1).size)
+        val successfulSaleId = successes.single().sale.id
+        assertEquals(1, db.saleDao().itemsFor(successfulSaleId).size)
+        assertEquals(saved.id, db.saleDao().itemsFor(successfulSaleId).single().productId)
+        assertEquals(1L, scalar("SELECT COUNT(*) FROM sales"))
+        assertEquals(1L, scalar("SELECT COUNT(*) FROM inventory_movements WHERE type='SALE'"))
+        assertEquals(1L, scalar("SELECT COUNT(*) FROM payments WHERE saleId=$successfulSaleId"))
+        assertEquals(10_000L, scalar("SELECT SUM(amount) FROM payments WHERE saleId=$successfulSaleId"))
+        assertEquals(10_000L, scalar("SELECT totalCashSales FROM shifts WHERE id=${shift.id}"))
+        assertEquals(0L, scalar("SELECT totalNonCashSales FROM shifts WHERE id=${shift.id}"))
     }
     }
 
@@ -73,8 +84,14 @@ class CheckoutConcurrencyTest {
             }.awaitAll()
         }
         val invoices = results.filterIsInstance<SalesRepository.CheckoutResult.Success>().map { it.invoice }
-        assertEquals(invoices.size, invoices.toSet().size) // all unique
-        assertTrue(invoices.isNotEmpty())
+        assertEquals(0, results.filterIsInstance<SalesRepository.CheckoutResult.Failure>().size)
+        assertEquals(8, invoices.size)
+        assertEquals(8, invoices.toSet().size)
+        val saleIds = results.filterIsInstance<SalesRepository.CheckoutResult.Success>().map { it.sale.id }
+        assertEquals(8, saleIds.toSet().size)
+        assertEquals(8L, scalar("SELECT COUNT(*) FROM sales"))
+        assertEquals(92L, db.productDao().stockOf(saved.id))
+        assertEquals(9L, scalar("SELECT CAST(value AS INTEGER) FROM settings WHERE `key`='pos.invoice_seq'"))
     }
     }
 }

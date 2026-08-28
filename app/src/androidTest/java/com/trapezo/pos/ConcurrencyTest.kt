@@ -68,7 +68,7 @@ class ConcurrencyTest {
         val finalStock = db.productDao().stockOf(saved.id)!!
         assertTrue(finalStock >= 0)
         assertEquals(2L, finalStock)
-        assertTrue(results.count { it } <= 1)
+        assertEquals(1, results.count { it })
     }
     }
 
@@ -92,7 +92,7 @@ class ConcurrencyTest {
         val movementSum = db.inventoryDao().recent(100, 0).sumOf { it.quantity }
         // INITIAL (+4) + one successful REMOVE (-4) must net to zero.
         assertEquals(finalStock, 0L)
-        assertEquals(4L + movementSum, 0L)
+        assertEquals(0L, movementSum)
     }
     }
 }

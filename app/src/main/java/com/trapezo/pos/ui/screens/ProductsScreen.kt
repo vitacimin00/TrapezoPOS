@@ -221,24 +221,18 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
         }
     }
     if (createProduct) ProductEditorDialog(null, categoryList, onDismiss = { createProduct = false }, onSave = { product ->
-        scope.launch {
-            val r = AppGraph.products.save(product, userId)
-            if (r.ok) { createProduct = false; message = "Produk tersimpan"; reloadPageZero() } else message = r.error
-        }
+        val r = AppGraph.products.save(product, userId)
+        if (r.ok) { message = "Produk tersimpan"; reloadPageZero() } else message = r.error
+        r.ok
     })
     showForm?.let { existing -> ProductEditorDialog(existing, categoryList, onDismiss = { showForm = null }, onSave = { product ->
-        scope.launch {
-            val r = AppGraph.products.save(product, userId)
-            if (r.ok) {
-                // On successful DB commit, delete the old managed photo only after the
-                // replacement is referenced; the dialog's orphan guard already preserves
-                // the new file via saveSucceeded.
-                if (product.photo != existing.photo && !existing.photo.isNullOrBlank()) {
-                    PhotoStorage.deleteManaged(existing.photo)
-                }
-                showForm = null; message = "Produk diperbarui"; reloadPageZero()
-            } else message = r.error
-        }
+        val r = AppGraph.products.save(product, userId)
+        if (r.ok) {
+            // Delete the DB-owned old file only after the replacement commit succeeds.
+            if (product.photo != existing.photo && !existing.photo.isNullOrBlank()) PhotoStorage.deleteManaged(existing.photo)
+            message = "Produk diperbarui"; reloadPageZero()
+        } else message = r.error
+        r.ok
     }) }
     adjustProduct?.let { product -> StockAdjustDialog(product, userId, onDismiss = { adjustProduct = null }, onSaved = { text -> adjustProduct = null; message = text; reloadPageZero() }) }
     if (categoriesOpen) CategoryManagerDialog(categoryList, userId, onDismiss = { categoriesOpen = false }, onMessage = { message = it })
@@ -371,7 +365,7 @@ private fun ProductDraft.validationError(): String? {
 private fun ProductDraft.toEntity(): ProductEntity = ProductEntity(id = id, name = name.trim(), alternativeName = alternative.trim(), categoryId = categoryId, brand = brand.trim(), sku = sku.trim(), barcode = barcode.trim(), buyPrice = Money.parseOrNull(buy, allowBlank = true) ?: 0, marketPrice = Money.parseOrNull(market, allowBlank = true) ?: 0, sellPrice = Money.parseOrNull(sell, allowBlank = true) ?: 0, posSellPrice = Money.parseOrNull(pos, allowBlank = true) ?: 0, dynamicPriceEnabled = dynamic, trackInventory = track, stockQty = Money.parseOrNull(stock, allowBlank = true) ?: 0, lowStockAlert = Money.parseOrNull(minimum, allowBlank = true) ?: 0, uom = uom.trim().ifBlank { "PCS" }, uomName = uomName.trim().ifBlank { "Pieces" }, uomConverter = converter.replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 } ?: 1.0, weightKg = weight.replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 } ?: 0.0, loyaltyPoints = Money.parseOrNull(loyalty, allowBlank = true) ?: 0, description = description.trim(), notes = notes.trim(), published = published, posHidden = hidden, taxFreeItem = taxFree, nonServiceCharge = nonService, photo = photo, createdAt = createdAt)
 
 @Composable
-private fun ProductEditorDialog(existing: ProductEntity?, categories: List<CategoryEntity>, onDismiss: () -> Unit, onSave: (ProductEntity) -> Unit) {
+private fun ProductEditorDialog(existing: ProductEntity?, categories: List<CategoryEntity>, onDismiss: () -> Unit, onSave: suspend (ProductEntity) -> Boolean) {
     val context = LocalContext.current
     var draft by remember(existing?.id, categories) { mutableStateOf(existing?.toDraft(categories) ?: ProductDraft()) }
     val originalPhoto = existing?.photo
@@ -379,6 +373,13 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
     var advanced by remember { mutableStateOf(false) }
     var cameraFile by remember { mutableStateOf<File?>(null) }
     var saveSucceeded by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    fun replaceDraftPhoto(path: String) {
+        val previous = draft.photo
+        if (previous != null && previous != originalPhoto && previous != path) PhotoStorage.deleteManaged(previous)
+        draft = draft.copy(photo = path)
+    }
     fun startCamera(capture: (android.net.Uri) -> Unit) { val target = PhotoStorage.createCameraTarget(context); cameraFile = target.first; capture(target.second) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val raw = cameraFile
@@ -386,13 +387,13 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
             // Normalize the raw sensor capture (bounds check + resize + re-encode), then
             // discard the uncontrolled original so it never persists as the product photo.
             val normalized = PhotoStorage.importFromUri(context, androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", raw))
-            if (normalized != null) draft = draft.copy(photo = normalized)
+            if (normalized != null) replaceDraftPhoto(normalized)
             raw.delete()
         } else {
             raw?.delete()
         }
     }
-    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) PhotoStorage.importFromUri(context, uri)?.let { draft = draft.copy(photo = it) } }
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) PhotoStorage.importFromUri(context, uri)?.let(::replaceDraftPhoto) }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> if (granted) startCamera(cameraLauncher::launch) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -442,7 +443,17 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
                 }
             }
         },
-        confirmButton = { Button(onClick = { val invalid = draft.validationError(); if (invalid == null) { saveSucceeded = true; onSave(draft.toEntity()) } }, enabled = draft.name.trim().isNotEmpty()) { Text("SIMPAN") } },
+        confirmButton = { Button(onClick = {
+            val invalid = draft.validationError()
+            if (invalid == null && !saving) scope.launch {
+                saving = true
+                val ok = try { onSave(draft.toEntity()) } finally { saving = false }
+                if (ok) {
+                    saveSucceeded = true
+                    onDismiss()
+                }
+            }
+        }, enabled = draft.name.trim().isNotEmpty() && !saving) { Text(if (saving) "MENYIMPAN…" else "SIMPAN") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } }
     )
 

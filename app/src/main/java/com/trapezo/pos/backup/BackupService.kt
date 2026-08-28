@@ -59,18 +59,18 @@ class BackupService(private val context: Context) {
 
     suspend fun backupTo(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
         synchronized(lock) {
-            try {
+            AppDatabase.withMaintenance { current -> try {
                 val dbFile = context.getDatabasePath(AppDatabase.NAME)
-                if (!dbFile.exists()) return@synchronized BackupResult(false, "Database belum tersedia")
-                if (dbFile.length() > MAX_BACKUP_BYTES) return@synchronized BackupResult(false, "Database terlalu besar untuk dibackup")
+                if (!dbFile.exists()) return@withMaintenance BackupResult(false, "Database belum tersedia")
+                if (dbFile.length() > MAX_BACKUP_BYTES) return@withMaintenance BackupResult(false, "Database terlalu besar untuk dibackup")
 
-                val db = AppDatabase.get().openHelper.writableDatabase
+                val db = current.openHelper.writableDatabase
                 // 1. ensure the Trapezo marker is set (idempotent).
                 db.execSQL("PRAGMA application_id = $APP_ID")
                 // 2. checkpoint WAL into the main file and inspect the result.
                 val (busy, logPages, checkpointed) = checkpointResult(db)
                 if (busy != 0 || logPages != checkpointed) {
-                    return@synchronized BackupResult(false, "Checkpoint tidak selesai (busy=$busy, $checkpointed/$logPages halaman); coba lagi saat tidak ada operasi")
+                    return@withMaintenance BackupResult(false, "Checkpoint tidak selesai (busy=$busy, $checkpointed/$logPages halaman); coba lagi saat tidak ada operasi")
                 }
                 // 3. close Room so no handle can auto-checkpoint into the file mid-copy.
                 AppDatabase.closeAndClear()
@@ -83,23 +83,24 @@ class BackupService(private val context: Context) {
                 }
                 probe.close()
                 if (visible != APP_ID) {
-                    return@synchronized BackupResult(false, "Marker backup belum tertanam pada file utama")
+                    return@withMaintenance BackupResult(false, "Marker backup belum tertanam pada file utama")
                 }
                 // 5. copy the now-stable main database.
                 context.contentResolver.openOutputStream(uri)?.use { out ->
                     dbFile.inputStream().use { it.copyTo(out) }
-                } ?: return@synchronized BackupResult(false, "Tidak bisa menulis file backup")
+                } ?: return@withMaintenance BackupResult(false, "Tidak bisa menulis file backup")
                 BackupResult(true, "Backup berhasil dibuat", suggestedName())
             } catch (e: Exception) {
                 BackupResult(false, "Backup gagal: ${e.message}")
-            }
+            } }
         }
     }
 
     suspend fun restoreFrom(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
         synchronized(lock) {
+            AppDatabase.withMaintenance {
             val live = context.getDatabasePath(AppDatabase.NAME)
-            val parent = live.parentFile ?: return@synchronized BackupResult(false, "Folder database tidak tersedia")
+            val parent = live.parentFile ?: return@withMaintenance BackupResult(false, "Folder database tidak tersedia")
             val staged = File(parent, "${AppDatabase.NAME}.restore_staged")
             val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
             val wal = File(parent, "${AppDatabase.NAME}-wal")
@@ -117,29 +118,30 @@ class BackupService(private val context: Context) {
                             out.write(buf, 0, n)
                         }
                     }
-                } ?: return@synchronized BackupResult(false, "Tidak dapat membaca file yang dipilih")
+                } ?: return@withMaintenance BackupResult(false, "Tidak dapat membaca file yang dipilih")
 
                 val error = validateStaged(staged)
                 if (error != null) {
                     staged.delete()
-                    return@synchronized BackupResult(false, error)
+                    return@withMaintenance BackupResult(false, error)
                 }
 
                 AppDatabase.closeAndClear()
                 if (previous.exists()) previous.delete()
                 if (live.exists() && !live.renameTo(previous)) {
-                    return@synchronized BackupResult(false, "Gagal mengamankan database lama")
+                    return@withMaintenance BackupResult(false, "Gagal mengamankan database lama")
                 }
                 wal.delete()
                 shm.delete()
                 if (!staged.renameTo(live)) {
                     if (previous.exists()) previous.renameTo(live)
-                    return@synchronized BackupResult(false, "Gagal menerapkan database restore")
+                    return@withMaintenance BackupResult(false, "Gagal menerapkan database restore")
                 }
                 BackupResult(true, "Restore berhasil. Tutup lalu buka kembali aplikasi untuk memakai data baru.")
             } catch (e: Exception) {
                 staged.delete()
                 BackupResult(false, "Restore gagal: ${e.message}")
+            }
             }
         }
     }
