@@ -31,6 +31,12 @@ class ProductExcelService(private val db: AppDatabase) {
         /** Sanity ceiling for a single stock quantity cell. */
         const val MAX_QTY = 2_000_000_000L
         const val MAX_WEIGHT = 1_000_000.0
+
+        internal fun strictInteger(raw: String, cap: Long): Long? {
+            if (raw.isEmpty() || raw.any { it !in '0'..'9' }) return null
+            val value = raw.toLongOrNull() ?: return null
+            return value.takeIf { it <= cap }
+        }
     }
 
     enum class DuplicatePolicy { SKIP, UPDATE, CREATE_NEW }
@@ -97,7 +103,6 @@ class ProductExcelService(private val db: AppDatabase) {
         }
         val categories = db.categoryDao()
         val products = db.productDao()
-        val others = categories.byName("Lainnya") ?: CategoryEntity(name = "Lainnya").let { categories.insert(it); categories.byName("Lainnya")!! }
         for (row in preview.rows) {
             if (row.errors.isNotEmpty()) { failed++; messages += "Baris ${row.excelRow}: ${row.errors.joinToString()}"; continue }
             try {
@@ -145,6 +150,15 @@ class ProductExcelService(private val db: AppDatabase) {
                         // Revalidate the actor inside the write transaction so a deactivated
                         // admin cannot keep writing rows after their access is revoked.
                         com.trapezo.pos.data.repository.Authorization.requireActiveAdmin(db, userId)
+                        val categoryName = v["category"].orEmpty()
+                        val categoryId = when {
+                            categoryName.isBlank() -> targetExisting.categoryId
+                            else -> categories.byName(categoryName)?.id ?: when (categoryPolicy) {
+                                MissingCategoryPolicy.CREATE_AUTOMATICALLY -> categories.insert(CategoryEntity(name = categoryName))
+                                MissingCategoryPolicy.USE_OTHERS -> categories.byName("Lainnya")?.id
+                                    ?: categories.insert(CategoryEntity(name = "Lainnya"))
+                            }
+                        }
                         if (barcode.isNotBlank() && products.barcodeTaken(barcode, targetExisting.id) > 0) {
                             throw IllegalArgumentException("Barcode sudah dipakai produk lain")
                         }
@@ -153,6 +167,7 @@ class ProductExcelService(private val db: AppDatabase) {
                         }
                         val stockDelta = if (base.trackInventory) base.stockQty - targetExisting.stockQty else 0L
                         val persisted = base.copy(
+                            categoryId = categoryId,
                             stockQty = if (base.trackInventory) base.stockQty else targetExisting.stockQty,
                             createdAt = targetExisting.createdAt,
                             updatedAt = System.currentTimeMillis()
@@ -184,7 +199,7 @@ class ProductExcelService(private val db: AppDatabase) {
                             categoryName.isBlank() -> null
                             categories.byName(categoryName) != null -> categories.byName(categoryName)!!.id
                             categoryPolicy == MissingCategoryPolicy.CREATE_AUTOMATICALLY -> categories.insert(CategoryEntity(name = categoryName))
-                            else -> others.id
+                            else -> categories.byName("Lainnya")?.id ?: categories.insert(CategoryEntity(name = "Lainnya"))
                         }
                         val prepared = base.copy(
                             categoryId = categoryId,
@@ -249,23 +264,6 @@ class ProductExcelService(private val db: AppDatabase) {
      * negative where prohibited, Long overflow, and values beyond the operational ceiling.
      * Preview validation uses the same rule so an out-of-range value never becomes 0 later.
      */
-    private fun strictInteger(raw: String, cap: Long): Long? {
-        val clean = raw.trim()
-        if (clean.isEmpty()) return null
-        val digits = clean.filter { it.isDigit() }
-        if (digits.isEmpty()) return null
-        // Reject any sign of fractional input or non-integer formatting.
-        if (clean.contains('.') || clean.contains(',')) {
-            // allow thousand separators only when purely between digits, but never a decimal point
-            if (clean.contains('.')) return null
-            // commas as thousand separators are tolerated if every remaining char is digit/comma
-            if (clean.any { !it.isDigit() && it != ',' }) return null
-        }
-        if (digits.length > 18) return null
-        val value = digits.toLongOrNull() ?: return null
-        if (value < 0 || value > cap) return null
-        return value
-    }
     /** Strict boolean: only documented values; anything else is null so preview can flag it. */
     private fun parseBoolean(v: String?): Boolean? = when (v?.trim()?.lowercase()) {
         null, "" -> null

@@ -63,9 +63,30 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         const val NAME = "trapezo_pos.db"
         @Volatile private var instance: AppDatabase? = null
+        private val maintenanceMonitor = Object()
+        @Volatile private var maintenance = false
 
-        fun get(): AppDatabase = instance ?: synchronized(this) {
+        fun get(): AppDatabase = synchronized(maintenanceMonitor) {
+            while (maintenance) maintenanceMonitor.wait()
             instance ?: build(TrapezoApp.instance).also { instance = it }
+        }
+
+        /** Prevents Room from reopening while database files are maintained. */
+        internal fun <T> withMaintenance(block: (AppDatabase) -> T): T {
+            val current = synchronized(maintenanceMonitor) {
+                while (maintenance) maintenanceMonitor.wait()
+                val open = instance ?: build(TrapezoApp.instance).also { instance = it }
+                maintenance = true
+                open
+            }
+            return try {
+                block(current)
+            } finally {
+                synchronized(maintenanceMonitor) {
+                    maintenance = false
+                    maintenanceMonitor.notifyAll()
+                }
+            }
         }
 
         fun closeAndClear() = synchronized(this) {

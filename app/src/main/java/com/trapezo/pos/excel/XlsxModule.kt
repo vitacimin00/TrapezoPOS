@@ -2,6 +2,7 @@ package com.trapezo.pos.excel
 
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.FilterInputStream
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -117,7 +118,13 @@ object XlsxModule {
         val entries = HashMap<String, ByteArray>()
         var entryCount = 0
         var totalExpanded = 0L
-        ZipInputStream(stream.buffered()).use { zin ->
+        val counted = object : FilterInputStream(stream.buffered()) {
+            var count = 0L
+            override fun read(): Int = super.read().also { if (it >= 0) add(1) }
+            override fun read(b: ByteArray, off: Int, len: Int): Int = super.read(b, off, len).also { if (it > 0) add(it) }
+            private fun add(n: Int) { count += n; if (count > Limits.MAX_TOTAL_COMPRESSED_BYTES) throw IllegalArgumentException("File Excel terlalu besar (terkompresi)") }
+        }
+        ZipInputStream(counted).use { zin ->
             var e: ZipEntry? = zin.nextEntry
             var compressedRead = 0L
             while (e != null) {
@@ -208,9 +215,8 @@ object XlsxModule {
 
         // parse rows
         data class RawCell(var col: Int, var value: String)
-        val formulaCells = HashSet<Int>() // row0*1_000_000 + col0 sentinel tracking
-
         val outRows = ArrayList<List<String?>>()
+        val outRowHasFormula = ArrayList<Boolean>()
         var maxCols = 0
         val epoch1904 = wbXml.contains("date1904=\"1\"") || wbXml.contains("date1904=\"true\"")
 
@@ -221,6 +227,7 @@ object XlsxModule {
             val inner = rm.groupValues.getOrElse(1) { "" }
             if (inner.isEmpty()) return@forEach
             val cells = ArrayList<RawCell>()
+            var rowHasFormula = false
             Regex("<c ([^>]*?)/>|<c ([^>]*?)>(.*?)</c>", RegexOption.DOT_MATCHES_ALL).findAll(inner).forEach { cm ->
                 val attrs = cm.groupValues[2].ifEmpty { cm.groupValues[1] }
                 val body = if (cm.groupValues[3].isEmpty()) "" else cm.groupValues[3]
@@ -264,7 +271,7 @@ object XlsxModule {
                     text = "" // self-closed empty cell keeps grid alignment
                 }
                 if (text != null) cells.add(RawCell(colRow.first, text))
-                if (isFormula) formulaCells.add(colRow.second)
+                if (isFormula) rowHasFormula = true
             }
             if (cells.isNotEmpty()) {
                 val lastCol = cells.maxOf { it.col }
@@ -273,6 +280,7 @@ object XlsxModule {
                 val arr = arrayOfNulls<String>(lastCol + 1)
                 for (c in cells) arr[c.col] = c.value?.take(Limits.MAX_CELL_STRING)
                 outRows.add(arr.toList())
+                outRowHasFormula.add(rowHasFormula)
             }
         }
 
@@ -284,6 +292,7 @@ object XlsxModule {
         val usedHeaders = headers.mapIndexed { i, h -> h.ifBlank { "kolom_${i + 1}" } }
 
         val dataRows = ArrayList<Map<String, String>>()
+        val formulaDataRows = HashSet<Int>()
         for (i in (headerIdx + 1) until outRows.size) {
             val r = outRows[i]
             if (r.all { it.isNullOrBlank() }) continue
@@ -291,14 +300,9 @@ object XlsxModule {
             for (c in 0 until minOf(r.size, usedHeaders.size)) {
                 m[usedHeaders[c]] = (r[c] ?: "").trim()
             }
+            if (outRowHasFormula[i]) formulaDataRows.add(dataRows.size)
             dataRows.add(m)
         }
-        // Map raw sheet row indices to dataRow indices for the importer.
-        val headerRawIndex = headerIdx
-        val formulaDataRows = formulaCells.mapNotNull { rawRow ->
-            val dataIdx = rawRow - headerRawIndex - 1
-            if (dataIdx >= 0) dataIdx else null
-        }.toSet()
         return ReadResult(orderedSheets.map { it.name }, chosen.name, usedHeaders, dataRows, outRows.size - headerIdx - 1, formulaDataRows)
     }
 

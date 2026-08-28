@@ -12,6 +12,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -33,6 +34,7 @@ class RefundConcurrencyTest {
     }
 
     @After fun tearDown() { db.close() }
+    private fun scalar(sql: String): Long = db.openHelper.readableDatabase.query(sql).use { c -> c.moveToFirst(); c.getLong(0) }
 
     @Test fun concurrentRefunds_neverExceedSoldQuantityOrValue() {
         runBlocking {
@@ -54,13 +56,22 @@ class RefundConcurrencyTest {
                 async { refunds.refund(saleId, admin.id, listOf(RefundRepository.RequestedItem(saleItem, 2)), "refund B") }
             ).awaitAll()
         }
-        val succeeded = results.count { it is RefundRepository.Result.Success }
-        // At most one full-quantity refund may succeed; cumulative must not exceed sold=2.
-        assertTrue(succeeded <= 1)
+        val successes = results.filterIsInstance<RefundRepository.Result.Success>()
+        assertEquals(1, successes.size)
+        assertEquals(1, results.filterIsInstance<RefundRepository.Result.Error>().size)
+        val successfulRefundId = successes.single().refundId
+        assertEquals(2L, db.refundDao().itemsFor(successfulRefundId).single().quantity)
         val totalRefundedQty = db.refundDao().refundedQtyFor(saleItem.id)
-        assertTrue(totalRefundedQty <= 2)
+        assertEquals(2L, totalRefundedQty)
         val totalRefundedAmount = db.refundDao().refundedAmountFor(saleItem.id)
-        assertTrue(totalRefundedAmount <= saleItem.netTotal)
+        assertEquals(saleItem.netTotal, totalRefundedAmount)
+        assertEquals(saleItem.netTotal, db.refundDao().refundedTotalFor(saleId))
+        assertEquals(1L, scalar("SELECT COUNT(*) FROM refunds WHERE saleId=$saleId"))
+        assertEquals(1L, scalar("SELECT COUNT(*) FROM refund_items WHERE refundId=$successfulRefundId"))
+        assertEquals(saleItem.netTotal, scalar("SELECT SUM(amount) FROM refund_payments WHERE refundId=$successfulRefundId"))
+        assertEquals(2L, db.productDao().stockOf(saved.id))
+        assertEquals(100_000L, scalar("SELECT expectedCash FROM shifts WHERE id=${shift.id}"))
+        assertTrue(scalar("SELECT SUM(amount) FROM refund_payments WHERE refundId=$successfulRefundId") <= scalar("SELECT SUM(amount) FROM payments WHERE saleId=$saleId"))
     }
     }
 }
