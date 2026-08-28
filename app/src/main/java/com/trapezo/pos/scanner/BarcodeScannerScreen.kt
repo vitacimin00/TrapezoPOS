@@ -66,8 +66,11 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
         val scanner = remember { BarcodeScanning.getClient() }
         val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
         var consumed by remember { mutableStateOf(false) }
+        var bindError by remember { mutableStateOf<String?>(null) }
+        var retryKey by remember { mutableStateOf(0) }
 
-        DisposableEffect(lifecycleOwner) {
+        DisposableEffect(lifecycleOwner, retryKey) {
+            bindError = null
             val providerFuture = ProcessCameraProvider.getInstance(context)
             val listener = Runnable {
                 try {
@@ -90,20 +93,35 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
                     }
                     provider.unbindAll()
                     provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-                } catch (_: Exception) {
-                    // UI remains visible; user can close and use keyboard-wedge scanning instead.
+                } catch (e: Exception) {
+                    // Recoverable error state instead of a silent black screen.
+                    bindError = "Kamera tidak tersedia: ${e.message ?: "gagal membuka kamera"}"
                 }
             }
             providerFuture.addListener(listener, mainExecutor)
             onDispose {
                 try { providerFuture.get().unbindAll() } catch (_: Exception) { }
                 scanner.close()
+                // Explicitly reset torch-capability assumption on exit; the next session
+                // re-detects from the fresh camera binding rather than inheriting state.
             }
         }
 
         Box(Modifier.fillMaxSize()) {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
             TopAppBar(title = { Text("Scan Barcode", color = Color.White) }, navigationIcon = { IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Tutup", tint = Color.White) } }, modifier = Modifier.background(Color(0x55000000)))
+            bindError?.let { message ->
+                Card(
+                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(message, color = MaterialTheme.colorScheme.error)
+                        Text("Gunakan scanner keyboard-wedge melalui kolom pencarian Kasir sebagai alternatif.", style = MaterialTheme.typography.bodySmall)
+                        Button(onClick = { retryKey++ }) { Text("COBA LAGI") }
+                    }
+                }
+            }
             Card(modifier = Modifier.align(Alignment.BottomCenter).padding(22.dp), shape = RoundedCornerShape(16.dp)) {
                 Text("Arahkan kamera ke barcode produk", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurface)
             }

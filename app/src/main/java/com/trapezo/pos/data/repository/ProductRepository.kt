@@ -82,7 +82,7 @@ class ProductRepository(
     data class SaveResult(val ok: Boolean, val error: String?, val id: Long)
     private class Validation(message: String) : RuntimeException(message)
 
-    suspend fun save(p: ProductEntity, initialQtyOverride: Long? = null): SaveResult = withContext(Dispatchers.IO) {
+    suspend fun save(p: ProductEntity, userId: Long, initialQtyOverride: Long? = null): SaveResult = withContext(Dispatchers.IO) {
         if (p.name.isBlank()) return@withContext SaveResult(false, "Nama produk wajib diisi", 0)
         if (listOf(p.buyPrice, p.marketPrice, p.sellPrice, p.posSellPrice, p.lowStockAlert).any { it < 0 }) {
             return@withContext SaveResult(false, "Harga dan batas stok tidak boleh negatif", p.id)
@@ -90,6 +90,7 @@ class ProductRepository(
         try {
             var resultId = p.id
             db.withTransaction {
+                Authorization.requireActiveAdmin(db, userId)
                 var entity = p.copy(name = p.name.trim(), sku = p.sku.trim(), barcode = p.barcode.trim())
                 if (entity.barcode.isNotBlank() && productDao.barcodeTaken(entity.barcode, entity.id) > 0) {
                     throw Validation("Barcode sudah dipakai produk lain")
@@ -125,7 +126,7 @@ class ProductRepository(
                             )
                         )
                     }
-                    settings.audit(null, "PRODUCT_CREATE", "product", resultId, "Tambah produk ${inserted.name}")
+                    settings.audit(userId, "PRODUCT_CREATE", "product", resultId, "Tambah produk ${inserted.name}")
                 } else {
                     val current = productDao.byId(entity.id) ?: throw Validation("Produk tidak ditemukan")
                     productDao.update(
@@ -136,7 +137,7 @@ class ProductRepository(
                             updatedAt = System.currentTimeMillis()
                         )
                     )
-                    settings.audit(null, "PRODUCT_UPDATE", "product", entity.id, "Edit produk ${entity.name}")
+                    settings.audit(userId, "PRODUCT_UPDATE", "product", entity.id, "Edit produk ${entity.name}")
                 }
             }
             SaveResult(true, null, resultId)
@@ -147,13 +148,10 @@ class ProductRepository(
 
     data class LifecycleResult(val ok: Boolean, val error: String? = null)
 
-    suspend fun setActive(productId: Long, active: Boolean, userId: Long?): LifecycleResult = withContext(Dispatchers.IO) {
+    suspend fun setActive(productId: Long, active: Boolean, userId: Long): LifecycleResult = withContext(Dispatchers.IO) {
         try {
             db.withTransaction {
-                if (userId != null) {
-                    val actor = db.userDao().byId(userId) ?: throw Validation("Akun tidak ditemukan")
-                    if (!actor.isActive || actor.role != "ADMIN") throw Validation("Perubahan status produk hanya untuk admin")
-                }
+                Authorization.requireActiveAdmin(db, userId)
                 val current = productDao.byId(productId) ?: throw Validation("Produk tidak ditemukan")
                 if (current.isActive != active) {
                     val now = System.currentTimeMillis()
@@ -173,9 +171,10 @@ class ProductRepository(
         }
     }
 
-    suspend fun hardDeleteIfUnused(id: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun hardDeleteIfUnused(id: Long, userId: Long): Boolean = withContext(Dispatchers.IO) {
         var deleted = false
         db.withTransaction {
+            Authorization.requireActiveAdmin(db, userId)
             val used = db.openHelper.writableDatabase.compileStatement("SELECT COUNT(*) FROM sale_items WHERE productId=?").use { st ->
                 st.bindLong(1, id); st.simpleQueryForLong()
             }
@@ -184,16 +183,13 @@ class ProductRepository(
         deleted
     }
 
-    suspend fun adjustStock(product: ProductEntity, mode: String, amount: Long, reason: String, userId: Long?): Boolean =
+    suspend fun adjustStock(product: ProductEntity, mode: String, amount: Long, reason: String, userId: Long): Boolean =
         withContext(Dispatchers.IO) {
             if (mode !in setOf("ADD", "REMOVE", "SET")) return@withContext false
             if ((mode == "SET" && amount < 0) || (mode != "SET" && amount <= 0)) return@withContext false
             try {
                 db.withTransaction {
-                    if (userId != null) {
-                        val actor = db.userDao().byId(userId) ?: throw Validation("Akun tidak ditemukan")
-                        if (!actor.isActive || actor.role != "ADMIN") throw Validation("Penyesuaian stok hanya untuk admin")
-                    }
+                    Authorization.requireActiveAdmin(db, userId)
                     val current = productDao.byId(product.id) ?: throw Validation("Produk tidak ditemukan")
                     if (!current.trackInventory) throw Validation("Produk ini tidak melacak stok")
                     val delta = when (mode) {
@@ -229,10 +225,11 @@ class ProductRepository(
 
     data class CatResult(val ok: Boolean, val error: String?)
 
-    suspend fun saveCategory(c: CategoryEntity): CatResult = withContext(Dispatchers.IO) {
+    suspend fun saveCategory(c: CategoryEntity, userId: Long): CatResult = withContext(Dispatchers.IO) {
         if (c.name.isBlank()) return@withContext CatResult(false, "Nama kategori wajib")
         try {
             db.withTransaction {
+                Authorization.requireActiveAdmin(db, userId)
                 val name = c.name.trim()
                 val dup = categoryDao.byName(name)
                 if (dup != null && dup.id != c.id) throw Validation("Kategori sudah ada")
@@ -245,10 +242,11 @@ class ProductRepository(
         }
     }
 
-    suspend fun deleteCategorySafe(id: Long): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+    suspend fun deleteCategorySafe(id: Long, userId: Long): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
             var message = "Terhapus"
             db.withTransaction {
+                Authorization.requireActiveAdmin(db, userId)
                 val used = categoryDao.productsUsing(id)
                 if (used > 0) throw Validation("Kategori dipakai oleh $used produk; nonaktifkan saja.")
                 categoryDao.delete(id)
@@ -259,7 +257,10 @@ class ProductRepository(
         }
     }
 
-    suspend fun setCategoryActive(id: Long, active: Boolean) = withContext(Dispatchers.IO) {
-        db.withTransaction { categoryDao.setActive(id, active) }
+    suspend fun setCategoryActive(id: Long, active: Boolean, userId: Long) = withContext(Dispatchers.IO) {
+        db.withTransaction {
+            Authorization.requireActiveAdmin(db, userId)
+            categoryDao.setActive(id, active)
+        }
     }
 }

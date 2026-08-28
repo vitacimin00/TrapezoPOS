@@ -113,6 +113,8 @@ class SalesRepository(
                     ?: throw IllegalStateException("Shift tidak ditemukan")
                 check(currentShift.status == "OPEN") { "Shift sudah ditutup" }
                 check(currentShift.userId == user.id) { "Shift aktif bukan milik kasir yang login" }
+                val cashier = db.userDao().byId(user.id) ?: throw IllegalStateException("Akun kasir tidak ditemukan")
+                check(cashier.isActive) { "Akun kasir sudah tidak aktif" }
 
                 var invoice: String? = null
                 for (attempt in 0 until 5) {

@@ -73,13 +73,13 @@ abstract class AppDatabase : RoomDatabase() {
             instance = null
         }
 
-        private val MIGRATION_1_2 = object : Migration(1, 2) {
+        internal val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_sales_transactionStatus_createdAt ON sales(transactionStatus, createdAt)")
             }
         }
 
-        private val MIGRATION_2_3 = object : Migration(2, 3) {
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE sale_items ADD COLUMN netTotal INTEGER NOT NULL DEFAULT 0")
                 backfillSaleItemNetTotals(db)
@@ -101,7 +101,7 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        private val MIGRATION_3_4 = object : Migration(3, 4) {
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE users ADD COLUMN failedLoginCount INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE users ADD COLUMN lockedUntil INTEGER NOT NULL DEFAULT 0")
@@ -112,7 +112,7 @@ abstract class AppDatabase : RoomDatabase() {
          * Repairs any historical duplicate OPEN shifts and installs a hard database
          * invariant: only one row may carry openGuard=1; CLOSED rows use NULL.
          */
-        private val MIGRATION_4_5 = object : Migration(4, 5) {
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE shifts ADD COLUMN openGuard INTEGER DEFAULT NULL")
                 var keepOpenId: Long? = null

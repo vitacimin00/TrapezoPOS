@@ -18,12 +18,12 @@ object AppGraph {
      * every subsequent UI action to the newly opened database.
      */
     val db: AppDatabase get() = AppDatabase.get()
-    val settings: SettingsRepository get() = SettingsRepository(db.settingsDao())
+    val settings: SettingsRepository get() = SettingsRepository(db)
     val products: ProductRepository get() = ProductRepository(db, db.productDao(), db.categoryDao(), db.inventoryDao(), settings)
     val sales: SalesRepository get() = SalesRepository(db, db.saleDao(), settings)
     val customers: CustomerRepository get() = CustomerRepository(db, db.customerDao(), settings)
     val refunds: RefundRepository get() = RefundRepository(db)
     val shifts: ShiftRepository get() = ShiftRepository(db)
-    val store: StoreRepository get() = StoreRepository(db.storeDao())
+    val store: StoreRepository get() = StoreRepository(db)
     val users: UserRepository get() = UserRepository(db, db.userDao(), settings)
 }

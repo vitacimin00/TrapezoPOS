@@ -25,6 +25,12 @@ class ProductExcelService(private val db: AppDatabase) {
             "description", "photo_1", "photo_2", "photo_3", "photo_4", "photo_5", "photo_6", "photo_7",
             "photo_8", "photo_9", "photo_10", "notes", "tax_free_item", "non_service_charge"
         )
+
+        /** Sanity ceiling for a single Rupiah money cell (9 trillion). */
+        const val MAX_RUPIAH = 9_000_000_000_000L
+        /** Sanity ceiling for a single stock quantity cell. */
+        const val MAX_QTY = 2_000_000_000L
+        const val MAX_WEIGHT = 1_000_000.0
     }
 
     enum class DuplicatePolicy { SKIP, UPDATE, CREATE_NEW }
@@ -61,9 +67,14 @@ class ProductExcelService(private val db: AppDatabase) {
         Preview(book.activeSheet, rows.size, rows.count { it.errors.isEmpty() && !it.duplicate }, rows.count { it.errors.isNotEmpty() }, rows.count { it.duplicate }, rows.take(10), rows)
     }
 
-    suspend fun import(preview: Preview, duplicatePolicy: DuplicatePolicy = DuplicatePolicy.SKIP, categoryPolicy: MissingCategoryPolicy = MissingCategoryPolicy.USE_OTHERS, userId: Long? = null): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun import(preview: Preview, duplicatePolicy: DuplicatePolicy = DuplicatePolicy.SKIP, categoryPolicy: MissingCategoryPolicy = MissingCategoryPolicy.USE_OTHERS, userId: Long): ImportResult = withContext(Dispatchers.IO) {
         var imported = 0; var updated = 0; var skipped = 0; var failed = 0
         val messages = mutableListOf<String>()
+        try {
+            com.trapezo.pos.data.repository.Authorization.requireActiveAdmin(db, userId)
+        } catch (e: Exception) {
+            return@withContext ImportResult(0, 0, 0, preview.rows.size, listOf("Import hanya untuk admin aktif"))
+        }
         val categories = db.categoryDao()
         val products = db.productDao()
         val others = categories.byName("Lainnya") ?: CategoryEntity(name = "Lainnya").let { categories.insert(it); categories.byName("Lainnya")!! }
@@ -194,8 +205,15 @@ class ProductExcelService(private val db: AppDatabase) {
         return candidate
     }
     private fun parseNumber(v: String): Double? = ExcelNumberParser.parse(v)
-    private fun money(v: String?): Long = parseNumber(v.orEmpty())?.toLong() ?: 0L
-    private fun qty(v: String?, def: Long = 0): Long = parseNumber(v.orEmpty())?.toLong() ?: def
-    private fun number(v: String?, def: Double): Double = parseNumber(v.orEmpty()) ?: def
+    private fun money(v: String?): Long = safeLong(parseNumber(v.orEmpty()), 0L, MAX_RUPIAH)
+    private fun qty(v: String?, def: Long = 0): Long = safeLong(parseNumber(v.orEmpty()), def, MAX_QTY)
+    private fun number(v: String?, def: Double): Double {
+        val d = parseNumber(v.orEmpty()) ?: return def
+        return if (d.isFinite() && d in -MAX_WEIGHT..MAX_WEIGHT) d else def
+    }
+    private fun safeLong(d: Double?, def: Long, cap: Long): Long {
+        if (d == null || !d.isFinite() || d < 0 || d > cap.toDouble()) return def
+        return d.toLong()
+    }
     private fun bool(v: String?, def: Boolean = false): Boolean = when (v?.trim()?.lowercase()) { "1", "true", "yes", "ya", "y" -> true; "0", "false", "no", "tidak", "n" -> false; else -> def }
 }

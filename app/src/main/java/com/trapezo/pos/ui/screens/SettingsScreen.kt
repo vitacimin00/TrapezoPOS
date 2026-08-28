@@ -189,7 +189,7 @@ fun SettingsScreen(user: UserEntity) {
                             draft.store.logo?.let { Text("Logo tersimpan: ${it.substringAfterLast('\\')}", style = MaterialTheme.typography.bodySmall) }
                             Button(onClick = {
                                 scope.launch {
-                                    AppGraph.store.save(draft.store)
+                                    AppGraph.store.save(draft.store, user.id)
                                     notice = "Pengaturan toko disimpan"
                                 }
                             }, modifier = Modifier.fillMaxWidth()) { Text("SIMPAN TOKO") }
@@ -211,10 +211,10 @@ fun SettingsScreen(user: UserEntity) {
                                 if (tax > 100 || service > 100) notice = "Pajak dan service charge maksimal 100%"
                                 else {
                                     scope.launch {
-                                        AppGraph.settings.put("pos.invoice_prefix", draft.invoicePrefix.trim().ifBlank { "INV" })
-                                        AppGraph.settings.putLong("pos.tax_percent", tax)
-                                        AppGraph.settings.putLong("pos.service_percent", service)
-                                        AppGraph.settings.putLong("pos.rounding", rounding)
+                                        AppGraph.settings.putSetting("pos.invoice_prefix", draft.invoicePrefix.trim().ifBlank { "INV" }, user.id)
+                                        AppGraph.settings.putLongSetting("pos.tax_percent", tax, user.id)
+                                        AppGraph.settings.putLongSetting("pos.service_percent", service, user.id)
+                                        AppGraph.settings.putLongSetting("pos.rounding", rounding, user.id)
                                         notice = "Pengaturan POS disimpan"
                                     }
                                 }
@@ -237,11 +237,11 @@ fun SettingsScreen(user: UserEntity) {
                             OutlinedTextField(draft.receiptFooter, { draft = draft.copy(receiptFooter = it) }, label = { Text("Footer struk") }, modifier = Modifier.fillMaxWidth())
                             Button(onClick = {
                                 scope.launch {
-                                    AppGraph.settings.put("receipt.paper", draft.receiptPaper + "mm")
-                                    AppGraph.settings.put("receipt.footer", draft.receiptFooter)
-                                    AppGraph.settings.put("receipt.show_logo", if (draft.showLogo) "1" else "0")
-                                    AppGraph.settings.put("receipt.show_address", if (draft.showAddress) "1" else "0")
-                                    AppGraph.settings.put("receipt.show_phone", if (draft.showPhone) "1" else "0")
+                                    AppGraph.settings.putSetting("receipt.paper", draft.receiptPaper + "mm", user.id)
+                                    AppGraph.settings.putSetting("receipt.footer", draft.receiptFooter, user.id)
+                                    AppGraph.settings.putSetting("receipt.show_logo", if (draft.showLogo) "1" else "0", user.id)
+                                    AppGraph.settings.putSetting("receipt.show_address", if (draft.showAddress) "1" else "0", user.id)
+                                    AppGraph.settings.putSetting("receipt.show_phone", if (draft.showPhone) "1" else "0", user.id)
                                     notice = "Pengaturan struk disimpan"
                                 }
                             }, modifier = Modifier.fillMaxWidth()) { Text("SIMPAN STRUK") }
@@ -289,7 +289,7 @@ fun SettingsScreen(user: UserEntity) {
     if (selectPrinter) PrinterPickerDialog(paired, onDismiss = { selectPrinter = false }, onSelect = { selected ->
         draft = draft.copy(printerAddress = selected.address)
         selectPrinter = false
-        scope.launch { AppGraph.settings.put("printer.address", selected.address); notice = "Printer ${selected.name} dipilih" }
+        scope.launch { AppGraph.settings.putSetting("printer.address", selected.address, user.id); notice = "Printer ${selected.name} dipilih" }
     })
     if (restoreConfirm && restoreUri != null) RestoreConfirmDialog(onDismiss = { restoreConfirm = false; restoreUri = null }, onConfirm = {
         val uri = restoreUri ?: return@RestoreConfirmDialog
