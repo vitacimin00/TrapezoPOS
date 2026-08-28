@@ -20,6 +20,12 @@ class UserRepository(
     suspend fun all(): List<UserEntity> = withContext(Dispatchers.IO) { users.all() }
     suspend fun hasUsers(): Boolean = withContext(Dispatchers.IO) { users.count() > 0 }
 
+    /** Existing installs created by the legacy seed must not keep admin/admin123. */
+    suspend fun requiresLegacyDefaultReset(): Boolean = withContext(Dispatchers.IO) {
+        val legacy = users.byUsername("admin") ?: return@withContext false
+        legacy.role == "ADMIN" && PasswordUtil.verify("admin123", legacy.passwordHash)
+    }
+
     /** Creates the only first-run owner account. It is impossible once any user exists. */
     suspend fun bootstrapAdmin(
         username: String,
@@ -62,6 +68,66 @@ class UserRepository(
             SaveResult(user = saved)
         } catch (e: Exception) {
             SaveResult(error = e.message ?: "Gagal membuat akun pemilik")
+        }
+    }
+
+    /**
+     * Upgrade path for the old universal credential. The app blocks normal login while
+     * this condition exists and replaces the legacy admin identity/password atomically.
+     */
+    suspend fun resetLegacyDefaultAdmin(
+        username: String,
+        displayName: String,
+        password: String
+    ): SaveResult = withContext(Dispatchers.IO) {
+        val cleanUsername = username.trim()
+        val cleanName = displayName.trim()
+        if (cleanUsername.length < 3) return@withContext SaveResult(error = "Username minimal 3 karakter")
+        if (cleanName.isBlank()) return@withContext SaveResult(error = "Nama pemilik wajib diisi")
+        if (password.length < 8) return@withContext SaveResult(error = "Password minimal 8 karakter")
+        if (cleanUsername.equals("admin", ignoreCase = true) && password == "admin123") {
+            return@withContext SaveResult(error = "Gunakan kredensial baru, bukan admin/admin123")
+        }
+
+        try {
+            var saved: UserEntity? = null
+            db.withTransaction {
+                val legacy = users.byUsername("admin")
+                    ?: throw IllegalStateException("Akun default lama tidak ditemukan")
+                if (legacy.role != "ADMIN" || !PasswordUtil.verify("admin123", legacy.passwordHash)) {
+                    throw IllegalStateException("Kredensial default lama sudah tidak aktif")
+                }
+                val duplicate = users.byUsername(cleanUsername)
+                if (duplicate != null && duplicate.id != legacy.id) {
+                    throw IllegalArgumentException("Username sudah digunakan")
+                }
+                val now = System.currentTimeMillis()
+                val secured = legacy.copy(
+                    username = cleanUsername,
+                    passwordHash = PasswordUtil.hash(password),
+                    name = cleanName,
+                    role = "ADMIN",
+                    isActive = true,
+                    failedLoginCount = 0,
+                    lockedUntil = 0,
+                    updatedAt = now
+                )
+                users.update(secured)
+                db.settingsDao().insertAudit(
+                    AuditLogEntity(
+                        userId = legacy.id,
+                        action = "LEGACY_OWNER_CREDENTIAL_RESET",
+                        referenceType = "user",
+                        referenceId = legacy.id,
+                        description = "Legacy default credential replaced with owner-defined credential",
+                        createdAt = now
+                    )
+                )
+                saved = secured
+            }
+            SaveResult(user = saved)
+        } catch (e: Exception) {
+            SaveResult(error = e.message ?: "Gagal mengamankan akun default lama")
         }
     }
 
