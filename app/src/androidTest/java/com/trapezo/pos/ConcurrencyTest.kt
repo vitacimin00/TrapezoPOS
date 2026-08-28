@@ -22,15 +22,18 @@ class ConcurrencyTest {
     private lateinit var db: com.trapezo.pos.data.database.AppDatabase
     private lateinit var admin: UserEntity
 
-    @Before fun setUp() = runBlocking {
+    @Before fun setUp() {
+        runBlocking {
         db = TestDb.inMemory()
         admin = db.userDao().insert(TestDb.admin(active = true)).let { TestDb.admin(active = true).copy(id = it) }
         db.userDao().insert(TestDb.cashier(active = true))
     }
+    }
 
     @After fun tearDown() { db.close() }
 
-    @Test fun doubleShiftOpen_onlyOneSucceeds() = runBlocking {
+    @Test fun doubleShiftOpen_onlyOneSucceeds() {
+        runBlocking {
         val shifts = TestDb.shifts(db)
         val results = withContext(Dispatchers.IO) {
             listOf(
@@ -43,8 +46,10 @@ class ConcurrencyTest {
         val openCount = db.shiftDao().anyOpenShift()?.let { 1 } ?: 0
         assertEquals(1, openCount)
     }
+    }
 
-    @Test fun concurrentStockRemoval_neverGoesNegative() = runBlocking {
+    @Test fun concurrentStockRemoval_neverGoesNegative() {
+        runBlocking {
         val products = TestDb.products(db)
         val saved = products.save(
             ProductEntity(name = "Item", sku = "SKU-C", trackInventory = true, stockQty = 5),
@@ -65,8 +70,10 @@ class ConcurrencyTest {
         assertEquals(2L, finalStock)
         assertTrue(results.count { it } <= 1)
     }
+    }
 
-    @Test fun concurrentStockRemoval_movementLedgerMatchesFinalStock() = runBlocking {
+    @Test fun concurrentStockRemoval_movementLedgerMatchesFinalStock() {
+        runBlocking {
         val products = TestDb.products(db)
         val saved = products.save(
             ProductEntity(name = "Item", sku = "SKU-L", trackInventory = true, stockQty = 4),
@@ -86,5 +93,6 @@ class ConcurrencyTest {
         // INITIAL (+4) + one successful REMOVE (-4) must net to zero.
         assertEquals(finalStock, 0L)
         assertEquals(4L + movementSum, 0L)
+    }
     }
 }

@@ -62,6 +62,19 @@ class ProductExcelService(private val db: AppDatabase) {
                 val s = v[key].orEmpty()
                 if (s.isNotBlank() && strictInteger(s, MAX_QTY) == null) errors += "$key harus berupa bilangan bulat dalam rentang aman"
             }
+            // Decimal-capable fields must still be valid finite numbers (not silent defaults).
+            listOf("uom_converter", "weight_kg").forEach { key ->
+                val s = v[key].orEmpty()
+                if (s.isNotBlank()) {
+                    val d = s.replace(',', '.').toDoubleOrNull()
+                    if (d == null || !d.isFinite() || d < 0 || d > MAX_WEIGHT) errors += "$key harus berupa angka valid dalam rentang aman"
+                }
+            }
+            // Boolean fields: only a documented set is accepted; anything else is an error.
+            listOf("pos_sell_price_dynamic", "is_customer_comission_percentage", "track_inventory", "published", "pos_hidden", "tax_free_item", "non_service_charge").forEach { key ->
+                val s = v[key].orEmpty()
+                if (s.isNotBlank() && parseBoolean(s) == null) errors += "$key harus bernilai true/false, 1/0, yes/no, atau ya/tidak"
+            }
             val barcode = v["barcode"].orEmpty()
             val sku = v["sku"].orEmpty()
             val duplicateInFile = (barcode.isNotBlank() && !seenBarcodes.add(barcode)) ||
@@ -102,23 +115,18 @@ class ProductExcelService(private val db: AppDatabase) {
                     // SKU/barcode identify a product. Creating a separate product must
                     // generate/clear only conflicting identifiers, never clone IDs.
                     val notes = mutableListOf<String>()
-                    if (skuMatch != null || sku.isBlank()) { sku = nextSku(); notes += "SKU $sku" }
+                    // SKU reservation happens inside the write transaction below, so a
+                    // manual product create cannot steal the same sequence concurrently.
+                    if (skuMatch != null || sku.isBlank()) { notes += "SKU baru" }
                     if (barcodeMatch != null) { barcode = ""; notes += "barcode dikosongkan" }
                     targetExisting = null
                     messages += "Baris ${row.excelRow}: produk baru dibuat (${notes.joinToString()})"
-                }
-                val categoryName = v["category"].orEmpty()
-                val categoryId = when {
-                    categoryName.isBlank() -> null
-                    categories.byName(categoryName) != null -> categories.byName(categoryName)!!.id
-                    categoryPolicy == MissingCategoryPolicy.CREATE_AUTOMATICALLY -> categories.insert(CategoryEntity(name = categoryName))
-                    else -> others.id
                 }
                 val price = money(v["sell_price"])
                 val posPrice = money(v["pos_sell_price"]).takeIf { it > 0 } ?: price
                 val base = ProductEntity(
                     id = targetExisting?.id ?: 0,
-                    name = v["name"].orEmpty(), alternativeName = v["alternative_name"].orEmpty(), categoryId = categoryId,
+                    name = v["name"].orEmpty(), alternativeName = v["alternative_name"].orEmpty(), categoryId = null,
                     brand = v["brand"].orEmpty(), sku = sku, barcode = barcode, buyPrice = money(v["buy_price"]),
                     marketPrice = money(v["market_price"]), sellPrice = price, posSellPrice = posPrice,
                     dynamicPriceEnabled = bool(v["pos_sell_price_dynamic"]), commission = money(v["comission"]),
@@ -134,6 +142,9 @@ class ProductExcelService(private val db: AppDatabase) {
                     // UPDATE is atomic: catalog update plus the exact stock delta and
                     // inventory movement are committed together.
                     db.withTransaction {
+                        // Revalidate the actor inside the write transaction so a deactivated
+                        // admin cannot keep writing rows after their access is revoked.
+                        com.trapezo.pos.data.repository.Authorization.requireActiveAdmin(db, userId)
                         if (barcode.isNotBlank() && products.barcodeTaken(barcode, targetExisting.id) > 0) {
                             throw IllegalArgumentException("Barcode sudah dipakai produk lain")
                         }
@@ -167,7 +178,18 @@ class ProductExcelService(private val db: AppDatabase) {
                         // Revalidate the actor inside the write transaction (actor may have
                         // been deactivated mid-import; do not let stale rows keep writing).
                         com.trapezo.pos.data.repository.Authorization.requireActiveAdmin(db, userId)
-                        val prepared = base.copy(sku = base.sku.ifBlank { nextSku() })
+                        // Resolve the category inside the authorized transaction.
+                        val categoryName = v["category"].orEmpty()
+                        val categoryId = when {
+                            categoryName.isBlank() -> null
+                            categories.byName(categoryName) != null -> categories.byName(categoryName)!!.id
+                            categoryPolicy == MissingCategoryPolicy.CREATE_AUTOMATICALLY -> categories.insert(CategoryEntity(name = categoryName))
+                            else -> others.id
+                        }
+                        val prepared = base.copy(
+                            categoryId = categoryId,
+                            sku = base.sku.ifBlank { nextSku() }
+                        )
                         if (prepared.barcode.isNotBlank() && products.barcodeTaken(prepared.barcode, 0) > 0) {
                             throw IllegalArgumentException("Barcode sudah dipakai produk lain")
                         }
@@ -244,5 +266,14 @@ class ProductExcelService(private val db: AppDatabase) {
         if (value < 0 || value > cap) return null
         return value
     }
-    private fun bool(v: String?, def: Boolean = false): Boolean = when (v?.trim()?.lowercase()) { "1", "true", "yes", "ya", "y" -> true; "0", "false", "no", "tidak", "n" -> false; else -> def }
+    /** Strict boolean: only documented values; anything else is null so preview can flag it. */
+    private fun parseBoolean(v: String?): Boolean? = when (v?.trim()?.lowercase()) {
+        null, "" -> null
+        "1", "true", "yes", "ya", "y" -> true
+        "0", "false", "no", "tidak", "n" -> false
+        else -> null
+    }
+
+    /** Internal use: applies the same strict rule but uses the documented default for blank. */
+    private fun bool(v: String?, def: Boolean = false): Boolean = parseBoolean(v) ?: def
 }

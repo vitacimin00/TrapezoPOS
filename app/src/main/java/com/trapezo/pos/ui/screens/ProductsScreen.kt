@@ -230,11 +230,9 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
         scope.launch {
             val r = AppGraph.products.save(product, userId)
             if (r.ok) {
-                // The dialog committed; the photo is now referenced. Clear the draft's
-                // orphan-cleanup obligation for the replacement, and delete the old one.
-                if (product.photo != existing.photo && !product.photo.isNullOrBlank()) {
-                    // replacement is now live; dialog will dispose without deleting it
-                }
+                // On successful DB commit, delete the old managed photo only after the
+                // replacement is referenced; the dialog's orphan guard already preserves
+                // the new file via saveSucceeded.
                 if (product.photo != existing.photo && !existing.photo.isNullOrBlank()) {
                     PhotoStorage.deleteManaged(existing.photo)
                 }
@@ -380,6 +378,7 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
     var selectCategory by remember { mutableStateOf(false) }
     var advanced by remember { mutableStateOf(false) }
     var cameraFile by remember { mutableStateOf<File?>(null) }
+    var saveSucceeded by remember { mutableStateOf(false) }
     fun startCamera(capture: (android.net.Uri) -> Unit) { val target = PhotoStorage.createCameraTarget(context); cameraFile = target.first; capture(target.second) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val raw = cameraFile
@@ -443,18 +442,22 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
                 }
             }
         },
-        confirmButton = { Button(onClick = { val invalid = draft.validationError(); if (invalid == null) onSave(draft.toEntity()) }, enabled = draft.name.trim().isNotEmpty()) { Text("SIMPAN") } },
+        confirmButton = { Button(onClick = { val invalid = draft.validationError(); if (invalid == null) { saveSucceeded = true; onSave(draft.toEntity()) } }, enabled = draft.name.trim().isNotEmpty()) { Text("SIMPAN") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } }
     )
 
-    // Orphan cleanup: if the editor is dismissed after a new photo was imported (or the
-    // camera temp was normalized) without saving, delete the new managed draft file so
-    // unreferenced images do not accumulate. Never delete the original referenced photo.
+    // Orphan cleanup policy (explicit ownership):
+    //  - new photo selected + user CANCELS  -> delete the unreferenced managed draft;
+    //  - new photo selected + SAVE FAILS    -> editor stays open, file stays for retry;
+    //  - new photo selected + SAVE SUCCEEDS -> new file remains and DB references it;
+    //    the old referenced file is deleted only after the successful DB commit.
     DisposableEffect(Unit) {
         onDispose {
-            val newPhoto = draft.photo
-            if (newPhoto != null && newPhoto != originalPhoto) {
-                com.trapezo.pos.utils.PhotoStorage.deleteManaged(newPhoto)
+            if (!saveSucceeded) {
+                val newPhoto = draft.photo
+                if (newPhoto != null && newPhoto != originalPhoto) {
+                    com.trapezo.pos.utils.PhotoStorage.deleteManaged(newPhoto)
+                }
             }
         }
     }

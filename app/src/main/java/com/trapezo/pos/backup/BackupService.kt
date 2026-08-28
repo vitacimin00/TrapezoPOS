@@ -13,16 +13,18 @@ import java.util.Locale
 /**
  * Local SQLite backup/restore through Storage Access Framework streams.
  *
- * Snapshot order is fixed so the copied raw `.db` already contains the Trapezo
- * `application_id` marker before any byte is read. Because the app runs in WAL mode,
- * we (1) write the marker, (2) run a FULL checkpoint, and (3) re-verify the marker is
- * visible from a fresh connection before copying — guaranteeing the WAL content is in
- * the main file. Backup/restore is serialized through [lock] so a concurrent write
- * cannot interleave with the checkpoint+snapshot.
+ * Snapshot safety order:
+ *   1. serialize via [lock] (backup/restore never overlap);
+ *   2. ensure the Trapezo `application_id` marker is set (idempotent);
+ *   3. run a FULL checkpoint and *inspect* its result — a BUSY/incomplete checkpoint
+ *      aborts the backup rather than producing a snapshot that misses the marker;
+ *   4. close Room cleanly (AppDatabase.closeAndClear) so no SQLite handle can
+ *      auto-checkpoint into the main file while bytes are being copied;
+ *   5. copy the stable main database;
+ *   6. Room reopens lazily through AppGraph on the next access.
  *
- * Restore validates a staged file before touching the live DB: SQLite header, size cap,
- * Trapezo application marker (with documented legacy-backup handling), schema version,
- * required core tables and integrity.
+ * Room owns `PRAGMA user_version`; we never set it manually. The Trapezo marker
+ * is carried by `application_id` only.
  */
 class BackupService(private val context: Context) {
     data class BackupResult(val ok: Boolean, val message: String, val fileName: String? = null)
@@ -44,24 +46,46 @@ class BackupService(private val context: Context) {
     fun suggestedName(): String =
         "TrapezoPOS_Backup_${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}.db"
 
+    /**
+     * Returns the checkpoint result as (busy, logPages, checkpointedPages).
+     * busy != 0 or logPages != checkpointedPages means the checkpoint did not fully
+     * transfer WAL content into the main database file.
+     */
+    private fun checkpointResult(db: androidx.sqlite.db.SupportSQLiteDatabase): Triple<Int, Int, Int> {
+        db.query("PRAGMA wal_checkpoint(FULL)").use { c ->
+            return if (c.moveToFirst()) Triple(c.getInt(0), c.getInt(1), c.getInt(2)) else Triple(1, 0, 0)
+        }
+    }
+
     suspend fun backupTo(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
         synchronized(lock) {
             try {
-                val db = AppDatabase.get().openHelper.writableDatabase
-                // 1. ensure the Trapezo marker is set (idempotent).
-                db.execSQL("PRAGMA application_id = $APP_ID")
-                // 2. checkpoint WAL into the main file so the marker is in the raw .db.
-                db.query("PRAGMA wal_checkpoint(FULL)").close()
-                // 3. re-verify the marker is durable via a fresh read before copying.
-                val visible = db.query("PRAGMA application_id").use { c ->
-                    if (c.moveToFirst()) c.getInt(0) else 0
-                }
-                if (visible != APP_ID) {
-                    return@synchronized BackupResult(false, "Checkpoint gagal; marker backup belum tertanam")
-                }
                 val dbFile = context.getDatabasePath(AppDatabase.NAME)
                 if (!dbFile.exists()) return@synchronized BackupResult(false, "Database belum tersedia")
                 if (dbFile.length() > MAX_BACKUP_BYTES) return@synchronized BackupResult(false, "Database terlalu besar untuk dibackup")
+
+                val db = AppDatabase.get().openHelper.writableDatabase
+                // 1. ensure the Trapezo marker is set (idempotent).
+                db.execSQL("PRAGMA application_id = $APP_ID")
+                // 2. checkpoint WAL into the main file and inspect the result.
+                val (busy, logPages, checkpointed) = checkpointResult(db)
+                if (busy != 0 || logPages != checkpointed) {
+                    return@synchronized BackupResult(false, "Checkpoint tidak selesai (busy=$busy, $checkpointed/$logPages halaman); coba lagi saat tidak ada operasi")
+                }
+                // 3. close Room so no handle can auto-checkpoint into the file mid-copy.
+                AppDatabase.closeAndClear()
+                // 4. re-open the raw file read-only and confirm the marker is durable.
+                val probe = android.database.sqlite.SQLiteDatabase.openDatabase(
+                    dbFile.path, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+                )
+                val visible = probe.rawQuery("PRAGMA application_id", null).use { c ->
+                    if (c.moveToFirst()) c.getInt(0) else 0
+                }
+                probe.close()
+                if (visible != APP_ID) {
+                    return@synchronized BackupResult(false, "Marker backup belum tertanam pada file utama")
+                }
+                // 5. copy the now-stable main database.
                 context.contentResolver.openOutputStream(uri)?.use { out ->
                     dbFile.inputStream().use { it.copyTo(out) }
                 } ?: return@synchronized BackupResult(false, "Tidak bisa menulis file backup")

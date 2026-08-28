@@ -69,15 +69,21 @@ object ReceiptRenderer {
     }
 
     /**
-     * Deliberate, explicit ESC/POS byte mapping. Characters representable in the
-     * extended ASCII range are kept; non-ASCII characters (e.g. emoji, CJK) fall back
-     * to '?' rather than producing invalid multi-byte output on common thermal printers.
+     * Deliberate, explicit ESC/POS byte mapping. Printable characters in the extended
+     * ASCII range are kept; structural control characters required by receipt layout
+     * (LF 0x0A line feed, CR 0x0D) are preserved; other non-ASCII/control characters
+     * (e.g. emoji, CJK) fall back to '?' rather than producing invalid multi-byte output.
      */
     private fun String.toEscPos(): ByteArray {
         val out = ByteArray(length)
         for (i in indices) {
             val c = this[i]
-            out[i] = if (c.code in 0x20..0xFF) c.code.toByte() else '?'.code.toByte()
+            out[i] = when {
+                c.code == 0x0A -> 0x0A.toByte() // LF — receipt line structure
+                c.code == 0x0D -> 0x0D.toByte() // CR — allowed control
+                c.code in 0x20..0xFF -> c.code.toByte()
+                else -> '?'.code.toByte()
+            }
         }
         return out
     }

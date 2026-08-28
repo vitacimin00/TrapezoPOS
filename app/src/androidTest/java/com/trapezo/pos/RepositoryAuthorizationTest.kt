@@ -32,59 +32,79 @@ class RepositoryAuthorizationTest {
 
     @After fun tearDown() { db.close() }
 
-    @Test fun cashier_cannotCreateProduct() = runBlocking {
+    @Test fun cashier_cannotCreateProduct() {
+        runBlocking {
         val result = TestDb.products(db).save(ProductEntity(name = "Barang"), userId = 2)
         assertFalse(result.ok)
         assertTrue(result.error!!.contains("admin"))
     }
+    }
 
-    @Test fun adminCanCreateProduct() = runBlocking {
+    @Test fun adminCanCreateProduct() {
+        runBlocking {
         val result = TestDb.products(db).save(ProductEntity(name = "Barang"), userId = 1)
         assertTrue(result.ok)
     }
+    }
 
-    @Test fun cashier_cannotChangeProductLifecycle() = runBlocking {
+    @Test fun cashier_cannotChangeProductLifecycle() {
+        runBlocking {
         val saved = TestDb.products(db).save(ProductEntity(name = "Barang", sku = "S1"), userId = 1)
         val result = TestDb.products(db).setActive(saved.id, false, userId = 2)
         assertFalse(result.ok)
     }
+    }
 
-    @Test fun inactiveAdmin_cannotCreateProduct() = runBlocking {
+    @Test fun inactiveAdmin_cannotCreateProduct() {
+        runBlocking {
         db.userDao().update(TestDb.admin(active = false).copy(id = 1))
         val result = TestDb.products(db).save(ProductEntity(name = "Barang"), userId = 1)
         assertFalse(result.ok)
     }
+    }
 
-    @Test fun missingActor_cannotCreateProduct() = runBlocking {
+    @Test fun missingActor_cannotCreateProduct() {
+        runBlocking {
         val result = TestDb.products(db).save(ProductEntity(name = "Barang"), userId = 999)
         assertFalse(result.ok)
     }
+    }
 
-    @Test fun cashier_cannotMutateCategory() = runBlocking {
+    @Test fun cashier_cannotMutateCategory() {
+        runBlocking {
         val result = TestDb.products(db).saveCategory(CategoryEntity(name = "Kat"), userId = 2)
         assertFalse(result.ok)
     }
+    }
 
-    @Test fun adminCanMutateCategory() = runBlocking {
+    @Test fun adminCanMutateCategory() {
+        runBlocking {
         val result = TestDb.products(db).saveCategory(CategoryEntity(name = "Kat"), userId = 1)
         assertTrue(result.ok)
     }
+    }
 
-    @Test fun cashier_cannotMutateSettings() = runBlocking {
+    @Test fun cashier_cannotMutateSettings() {
+        runBlocking {
         val error = TestDb.settings(db).setPaymentMethodActive("QRIS", false, 2)
         assertNotNull(error)
     }
+    }
 
-    @Test fun cashier_cannotSaveStore() = runBlocking {
+    @Test fun cashier_cannotSaveStore() {
+        runBlocking {
         var threw = false
         try { TestDb.store(db).save(StoreEntity(name = "Toko"), 2) } catch (_: Exception) { threw = true }
         assertTrue(threw)
     }
+    }
 
-    @Test fun adminCannotDisableLastAdmin() = runBlocking {
+    @Test fun adminCannotDisableLastAdmin() {
+        runBlocking {
         // Last-active-admin protection already exercised in UserRepository; here we confirm
         // the repository rejects a cashier attempting user management.
         val result = TestDb.users(db).save(null, "u3", "Nama", "CASHIER", "password123", true, actorId = 2)
         assertNotNull(result.error)
+    }
     }
 }

@@ -68,4 +68,22 @@ class ReceiptTextSafetyTest {
         assertTrue(bytes.isNotEmpty())
         assertEquals(0x1b, bytes[0].toInt() and 0xff)
     }
+
+    @Test fun escPosBytes_preservesLineFeedAsStructuralByte() {
+        val bytes = ReceiptRenderer.escPosBytes(
+            store(), sale(grandTotal = 1_000L),
+            listOf(SaleItemEntity(saleId = 1, productNameSnapshot = "Kopi", quantity = 1, unitPrice = 1000L, subtotal = 1000L)),
+            listOf(PaymentEntity(saleId = 1, method = "CASH", amount = 1000L))
+        )
+        // LF (0x0A) must survive: receipt line structure depends on it.
+        val newlineCount = bytes.count { it.toInt() == 0x0A }
+        assertTrue("newline must be preserved in payload", newlineCount > 0)
+        // newline must NOT be replaced with '?'
+        assertTrue("newline must not become '?'", bytes.none { it == '?'.code.toByte() && it.toInt() == 0x0A })
+        // feed + cut bytes remain at the end
+        assertEquals(0x0a, bytes[bytes.size - 4].toInt() and 0xff)
+        assertEquals(0x1d, bytes[bytes.size - 3].toInt() and 0xff)
+        assertEquals(0x56, bytes[bytes.size - 2].toInt() and 0xff)
+        assertEquals(0x00, bytes[bytes.size - 1].toInt() and 0xff)
+    }
 }

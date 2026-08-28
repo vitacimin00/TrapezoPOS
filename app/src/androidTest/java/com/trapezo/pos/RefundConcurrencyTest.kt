@@ -24,15 +24,18 @@ class RefundConcurrencyTest {
     private lateinit var db: com.trapezo.pos.data.database.AppDatabase
     private lateinit var admin: com.trapezo.pos.data.entity.UserEntity
 
-    @Before fun setUp() = runBlocking {
+    @Before fun setUp() {
+        runBlocking {
         db = TestDb.inMemory()
         admin = db.userDao().insert(TestDb.admin(active = true)).let { TestDb.admin(active = true).copy(id = it) }
         db.paymentMethodDao().insert(com.trapezo.pos.data.entity.PaymentMethodEntity(name = "Tunai", type = "CASH", isActive = true))
     }
+    }
 
     @After fun tearDown() { db.close() }
 
-    @Test fun concurrentRefunds_neverExceedSoldQuantityOrValue() = runBlocking {
+    @Test fun concurrentRefunds_neverExceedSoldQuantityOrValue() {
+        runBlocking {
         val products = TestDb.products(db)
         val saved = products.save(ProductEntity(name = "Item", sku = "RF-1", trackInventory = true, stockQty = 2, sellPrice = 10_000), userId = admin.id)
         val shift = TestDb.shifts(db).open(admin, 100_000L).let { (it as com.trapezo.pos.data.repository.ShiftRepository.Result.Ok).shift }
@@ -58,5 +61,6 @@ class RefundConcurrencyTest {
         assertTrue(totalRefundedQty <= 2)
         val totalRefundedAmount = db.refundDao().refundedAmountFor(saleItem.id)
         assertTrue(totalRefundedAmount <= saleItem.netTotal)
+    }
     }
 }
