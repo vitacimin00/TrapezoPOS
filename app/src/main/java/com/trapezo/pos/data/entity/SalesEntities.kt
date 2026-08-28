@@ -1,5 +1,6 @@
 package com.trapezo.pos.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -58,6 +59,7 @@ data class SaleItemEntity(
     val unitPrice: Long,
     val discount: Long = 0,
     val subtotal: Long,
+    @ColumnInfo(defaultValue = "0") val netTotal: Long = 0,
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -90,7 +92,7 @@ data class PaymentMethodEntity(
 
 @Entity(
     tableName = "refunds",
-    indices = [Index(value = ["saleId"])],
+    indices = [Index(value = ["saleId"]), Index(value = ["shiftId"])],
     foreignKeys = [ForeignKey(
         entity = SaleEntity::class,
         parentColumns = ["id"],
@@ -102,6 +104,7 @@ data class RefundEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val saleId: Long,
     val userId: Long,
+    val shiftId: Long? = null,
     val total: Long,
     val reason: String = "",
     val createdAt: Long = System.currentTimeMillis()
@@ -124,4 +127,22 @@ data class RefundItemEntity(
     val productId: Long? = null,
     val quantity: Long,
     val amount: Long
+)
+
+@Entity(
+    tableName = "refund_payments",
+    indices = [Index(value = ["refundId"]), Index(value = ["method"])],
+    foreignKeys = [ForeignKey(
+        entity = RefundEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["refundId"],
+        onDelete = ForeignKey.CASCADE
+    )]
+)
+data class RefundPaymentEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val refundId: Long,
+    val method: String,
+    val amount: Long,
+    val createdAt: Long = System.currentTimeMillis()
 )

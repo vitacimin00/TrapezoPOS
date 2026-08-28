@@ -10,17 +10,18 @@ import androidx.sqlite.db.SupportSQLiteQuery
 import com.trapezo.pos.data.entity.AuditLogEntity
 import com.trapezo.pos.data.entity.CashMovementEntity
 import com.trapezo.pos.data.entity.PaymentEntity
+import com.trapezo.pos.data.entity.RefundPaymentEntity
 import com.trapezo.pos.data.entity.SaleEntity
 import com.trapezo.pos.data.entity.SaleItemEntity
 import com.trapezo.pos.data.entity.SettingEntity
 import com.trapezo.pos.data.entity.ShiftEntity
-import com.trapezo.pos.data.entity.UserEntity
 
 data class DailyTotal(val dayStart: Long, val total: Long, val txCount: Int)
 data class MethodTotal(val method: String, val total: Long, val txCount: Int)
 data class TopProduct(val productId: Long?, val name: String, val qtySold: Long, val revenue: Long)
 data class CashierTotal(val userName: String, val txCount: Int, val total: Long)
 data class ItemSoldAgg(val totalQty: Double?, val lines: Int?)
+data class RefundMethodTotal(val method: String, val total: Long)
 
 @Dao
 interface SaleDao {
@@ -57,10 +58,10 @@ interface SaleDao {
     @Query("SELECT * FROM sales WHERE invoiceNumber=:invoice LIMIT 1")
     suspend fun saleByInvoice(invoice: String): SaleEntity?
 
-    @Query("SELECT * FROM sale_items WHERE saleId=:saleId")
+    @Query("SELECT * FROM sale_items WHERE saleId=:saleId ORDER BY id ASC")
     suspend fun itemsFor(saleId: Long): List<SaleItemEntity>
 
-    @Query("SELECT * FROM payments WHERE saleId=:saleId")
+    @Query("SELECT * FROM payments WHERE saleId=:saleId ORDER BY id ASC")
     suspend fun paymentsFor(saleId: Long): List<PaymentEntity>
 
     /** Dynamic filtered+paged history (filters built safely in repository with bound args). */
@@ -70,49 +71,87 @@ interface SaleDao {
     @RawQuery(observedEntities = [SaleEntity::class])
     suspend fun countRaw(query: SupportSQLiteQuery): Int
 
-    // ---- aggregates ----
+    // Net sales for a period: sales are recognized on sale.createdAt, refunds on refund.createdAt.
     @Query(
-        """SELECT COALESCE(SUM(grandTotal),0) AS total, COUNT(*) AS cnt FROM sales
-           WHERE createdAt BETWEEN :from AND :to AND transactionStatus != 'VOID'"""
+        """SELECT
+             COALESCE((SELECT SUM(s.grandTotal) FROM sales s
+                       WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'), 0)
+             -
+             COALESCE((SELECT SUM(r.total) FROM refunds r
+                       WHERE r.createdAt BETWEEN :from AND :to), 0) AS total,
+             (SELECT COUNT(*) FROM sales s2
+              WHERE s2.createdAt BETWEEN :from AND :to AND s2.transactionStatus != 'VOID') AS cnt"""
     )
     suspend fun totalsBetween(from: Long, to: Long): TotalRow
 
     @Query(
-        """SELECT CAST((createdAt/:dayMs)*:dayMs AS INTEGER) AS dayStart, SUM(grandTotal) AS total, COUNT(*) AS cnt
-           FROM sales WHERE createdAt BETWEEN :from AND :to AND transactionStatus != 'VOID'
-           GROUP BY dayStart ORDER BY dayStart ASC"""
-    )
-    suspend fun dailyTotals(from: Long, to: Long, dayMs: Long): List<DailyTotalRow>
-
-    @Query(
-        """SELECT p.method AS method, SUM(p.amount) AS total, COUNT(DISTINCT p.saleId) AS cnt
-           FROM payments p JOIN sales s ON s.id = p.saleId
-           WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'
-           GROUP BY p.method ORDER BY total DESC"""
+        """SELECT method, SUM(amount) AS total, SUM(saleCount) AS cnt
+           FROM (
+               SELECT p.method AS method, SUM(p.amount) AS amount,
+                      COUNT(DISTINCT p.saleId) AS saleCount
+               FROM payments p JOIN sales s ON s.id = p.saleId
+               WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'
+               GROUP BY p.method
+               UNION ALL
+               SELECT rp.method AS method, -SUM(rp.amount) AS amount, 0 AS saleCount
+               FROM refund_payments rp JOIN refunds r ON r.id = rp.refundId
+               WHERE r.createdAt BETWEEN :from AND :to
+               GROUP BY rp.method
+           ) movements
+           GROUP BY method ORDER BY total DESC"""
     )
     suspend fun totalsByMethod(from: Long, to: Long): List<MethodTotalRow>
 
     @Query(
-        """SELECT COALESCE(SUM(si.quantity),0) AS totalQty, COUNT(si.id) AS lines
-           FROM sale_items si JOIN sales s ON s.id = si.saleId
-           WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'"""
+        """SELECT COALESCE(SUM(qty),0) AS totalQty, COALESCE(SUM(lineCount),0) AS lines
+           FROM (
+               SELECT SUM(si.quantity) AS qty, COUNT(si.id) AS lineCount
+               FROM sale_items si JOIN sales s ON s.id = si.saleId
+               WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'
+               UNION ALL
+               SELECT -SUM(ri.quantity) AS qty, -COUNT(ri.id) AS lineCount
+               FROM refund_items ri JOIN refunds r ON r.id = ri.refundId
+               WHERE r.createdAt BETWEEN :from AND :to
+           ) movement"""
     )
     suspend fun itemsSoldBetween(from: Long, to: Long): ItemSoldAgg
 
     @Query(
-        """SELECT si.productId AS productId, si.productNameSnapshot AS name,
-                  SUM(si.quantity) AS qtySold, SUM(si.subtotal) AS revenue
-           FROM sale_items si JOIN sales s ON s.id = si.saleId
-           WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'
-           GROUP BY si.productId, si.productNameSnapshot
-           ORDER BY qtySold DESC LIMIT :limit"""
+        """SELECT productId, name, SUM(qty) AS qtySold, SUM(revenue) AS revenue
+           FROM (
+               SELECT si.productId AS productId, si.productNameSnapshot AS name,
+                      si.quantity AS qty, si.netTotal AS revenue
+               FROM sale_items si JOIN sales s ON s.id = si.saleId
+               WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'
+               UNION ALL
+               SELECT ri.productId AS productId, si.productNameSnapshot AS name,
+                      -ri.quantity AS qty, -ri.amount AS revenue
+               FROM refund_items ri
+               JOIN refunds r ON r.id = ri.refundId
+               JOIN sale_items si ON si.id = ri.saleItemId
+               WHERE r.createdAt BETWEEN :from AND :to
+           ) productMovement
+           GROUP BY productId, name
+           ORDER BY qtySold DESC, revenue DESC LIMIT :limit"""
     )
     suspend fun topProducts(from: Long, to: Long, limit: Int): List<TopProduct>
 
     @Query(
-        """SELECT COALESCE(userNameSnapshot,'?') AS userName, COUNT(*) AS txCount, SUM(grandTotal) AS total
-           FROM sales WHERE createdAt BETWEEN :from AND :to AND transactionStatus != 'VOID'
-           GROUP BY userNameSnapshot ORDER BY total DESC"""
+        """SELECT userName, SUM(txCount) AS txCount, SUM(total) AS total
+           FROM (
+               SELECT COALESCE(s.userNameSnapshot,'?') AS userName,
+                      COUNT(*) AS txCount, SUM(s.grandTotal) AS total
+               FROM sales s
+               WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'
+               GROUP BY s.userNameSnapshot
+               UNION ALL
+               SELECT COALESCE(s.userNameSnapshot,'?') AS userName,
+                      0 AS txCount, -SUM(r.total) AS total
+               FROM refunds r JOIN sales s ON s.id = r.saleId
+               WHERE r.createdAt BETWEEN :from AND :to
+               GROUP BY s.userNameSnapshot
+           ) cashierMovement
+           GROUP BY userName ORDER BY total DESC"""
     )
     suspend fun totalsByCashier(from: Long, to: Long): List<CashierTotal>
 
@@ -123,24 +162,41 @@ interface SaleDao {
 
 @Dao
 interface RefundDao {
-    @androidx.room.Insert
+    @Insert
     suspend fun insertRefund(r: com.trapezo.pos.data.entity.RefundEntity): Long
 
-    @androidx.room.Insert
+    @Insert
     suspend fun insertRefundItems(items: List<com.trapezo.pos.data.entity.RefundItemEntity>)
 
-    @Query("SELECT * FROM refunds WHERE saleId=:saleId")
+    @Insert
+    suspend fun insertRefundPayments(items: List<RefundPaymentEntity>)
+
+    @Query("SELECT * FROM refunds WHERE saleId=:saleId ORDER BY id ASC")
     suspend fun refundsForSale(saleId: Long): List<com.trapezo.pos.data.entity.RefundEntity>
 
-    @Query("SELECT * FROM refund_items WHERE refundId=:refundId")
+    @Query("SELECT * FROM refund_items WHERE refundId=:refundId ORDER BY id ASC")
     suspend fun itemsFor(refundId: Long): List<com.trapezo.pos.data.entity.RefundItemEntity>
+
+    @Query("SELECT * FROM refund_payments WHERE refundId=:refundId ORDER BY id ASC")
+    suspend fun paymentsFor(refundId: Long): List<RefundPaymentEntity>
 
     @Query("""SELECT COALESCE(SUM(ri.quantity),0) FROM refund_items ri
               JOIN refunds r ON r.id = ri.refundId WHERE ri.saleItemId=:saleItemId""")
     suspend fun refundedQtyFor(saleItemId: Long): Long
 
+    @Query("""SELECT COALESCE(SUM(ri.amount),0) FROM refund_items ri
+              JOIN refunds r ON r.id = ri.refundId WHERE ri.saleItemId=:saleItemId""")
+    suspend fun refundedAmountFor(saleItemId: Long): Long
+
     @Query("SELECT COALESCE(SUM(total),0) FROM refunds WHERE saleId=:saleId")
     suspend fun refundedTotalFor(saleId: Long): Long
+
+    @Query(
+        """SELECT rp.method AS method, COALESCE(SUM(rp.amount),0) AS total
+           FROM refund_payments rp JOIN refunds r ON r.id = rp.refundId
+           WHERE r.saleId=:saleId GROUP BY rp.method ORDER BY MIN(rp.id) ASC"""
+    )
+    suspend fun refundedMethodTotalsFor(saleId: Long): List<RefundMethodTotal>
 }
 
 @Dao
@@ -161,6 +217,14 @@ interface ShiftDao {
            expectedCash = expectedCash + :cashAmt WHERE id=:id"""
     )
     suspend fun addSaleTotals(id: Long, cashAmt: Long, nonCashAmt: Long)
+
+    @Query(
+        """UPDATE shifts SET totalCashSales = totalCashSales - :cashAmt,
+           totalNonCashSales = totalNonCashSales - :nonCashAmt,
+           expectedCash = expectedCash - :cashAmt
+           WHERE id=:id AND status='OPEN'"""
+    )
+    suspend fun addRefundTotals(id: Long, cashAmt: Long, nonCashAmt: Long): Int
 
     @Query("SELECT * FROM shifts WHERE userId=:userId AND status='OPEN' ORDER BY openedAt DESC LIMIT 1")
     suspend fun openShiftForUser(userId: Long): ShiftEntity?
