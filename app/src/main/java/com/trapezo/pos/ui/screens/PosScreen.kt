@@ -83,6 +83,7 @@ import com.trapezo.pos.printer.BluetoothPrinterService
 import com.trapezo.pos.printer.receiptInfo
 import com.trapezo.pos.scanner.BarcodeScannerScreen
 import com.trapezo.pos.utils.Money
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -110,11 +111,12 @@ fun PosScreen(user: UserEntity) {
     var paymentOpen by remember { mutableStateOf(false) }
     var quantityTarget by remember { mutableStateOf<CartLine?>(null) }
     var successReceipt by remember { mutableStateOf<ReceiptPayload?>(null) }
+    var paymentMethods by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
 
     fun reloadShift() {
         scope.launch { shift = AppGraph.db.shiftDao().openShiftForUser(user.id) }
     }
-    fun loadResults(text: String) { scope.launch { found = AppGraph.products.posSearch(text) } }
+
     fun addProduct(product: com.trapezo.pos.data.entity.ProductEntity) {
         val line = CartLine(
             productId = product.id,
@@ -137,7 +139,7 @@ fun PosScreen(user: UserEntity) {
         scope.launch {
             val product = AppGraph.products.byBarcode(clean) ?: AppGraph.products.barcodeInExtraTable(clean)
             if (product == null) notice = "Produk dengan barcode/SKU '$clean' tidak ditemukan"
-            else { addProduct(product); search = ""; loadResults("") }
+            else { addProduct(product); search = "" }
         }
     }
 
@@ -151,9 +153,14 @@ fun PosScreen(user: UserEntity) {
         svcPct = AppGraph.settings.servicePercent()
         rounding = AppGraph.settings.rounding()
         nextInvoice = AppGraph.settings.peekInvoiceNumber()
-        loadResults("")
+        paymentMethods = AppGraph.db.paymentMethodDao().active().map { it.type to it.name }
     }
-    LaunchedEffect(search) { loadResults(search) }
+    LaunchedEffect(search) {
+        delay(300)
+        val requested = search
+        val result = AppGraph.products.posSearch(requested, limit = 60)
+        if (search == requested) found = result
+    }
 
     if (scannerOpen) {
         BarcodeScannerScreen(onBarcode = { code -> scannerOpen = false; acceptBarcode(code) }, onDismiss = { scannerOpen = false })
@@ -226,6 +233,7 @@ fun PosScreen(user: UserEntity) {
     }) }
     if (paymentOpen && shift != null) PaymentDialog(
         total = totals.grandTotal,
+        methods = paymentMethods,
         onDismiss = { paymentOpen = false },
         onComplete = { tenders, refs ->
             scope.launch {
@@ -233,7 +241,9 @@ fun PosScreen(user: UserEntity) {
                     is SalesRepository.CheckoutResult.Success -> {
                         val details = AppGraph.sales.saleWithDetails(result.sale.id)
                         if (details != null) successReceipt = ReceiptPayload(details.first, details.second, details.third)
-                        cart = emptyList(); discount = OrderDiscount(); customer = null; paymentOpen = false; reloadShift()
+                        cart = emptyList(); discount = OrderDiscount(); customer = null; paymentOpen = false
+                        nextInvoice = AppGraph.settings.peekInvoiceNumber()
+                        reloadShift()
                     }
                     is SalesRepository.CheckoutResult.Failure -> notice = result.error
                 }
@@ -352,21 +362,45 @@ private fun DiscountDialog(current: OrderDiscount, subtotal: Long, onDismiss: ()
 
 @Composable
 private fun CustomerPickerDialog(onDismiss: () -> Unit, onSelect: (CustomerEntity?) -> Unit) {
-    val scope = rememberCoroutineScope(); var query by remember { mutableStateOf("") }; var customers by remember { mutableStateOf(emptyList<CustomerEntity>()) }
-    LaunchedEffect(query) { val result = AppGraph.customers.page(query); customers = result.first }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Pilih customer") }, text = { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { OutlinedTextField(query, { query = it }, label = { Text("Cari nama / HP / kode") }, singleLine = true); TextButton(onClick = { onSelect(null) }) { Text("Tanpa customer") }; LazyColumn(Modifier.height(180.dp)) { items(customers, key = { it.id }) { customer -> TextButton(onClick = { onSelect(customer) }, Modifier.fillMaxWidth()) { Column { Text(customer.name); Text("${customer.code} • ${customer.phone}", style = MaterialTheme.typography.bodySmall) } } } } } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } })
+    var query by remember { mutableStateOf("") }
+    var customers by remember { mutableStateOf(emptyList<CustomerEntity>()) }
+    var total by remember { mutableStateOf(0) }
+    var page by remember { mutableStateOf(0) }
+    LaunchedEffect(query, page) {
+        if (page == 0) delay(300)
+        val requestedQuery = query
+        val requestedPage = page
+        val result = AppGraph.customers.page(requestedQuery, requestedPage, 50)
+        if (query == requestedQuery && page == requestedPage) {
+            total = result.second
+            customers = if (requestedPage == 0) result.first
+            else (customers + result.first).distinctBy { it.id }
+        }
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Pilih customer") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedTextField(query, { query = it; page = 0 }, label = { Text("Cari nama / HP / kode") }, singleLine = true)
+            TextButton(onClick = { onSelect(null) }) { Text("Tanpa customer") }
+            LazyColumn(Modifier.height(180.dp)) {
+                items(customers, key = { it.id }) { customer ->
+                    TextButton(onClick = { onSelect(customer) }, Modifier.fillMaxWidth()) {
+                        Column { Text(customer.name); Text("${customer.code} • ${customer.phone}", style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+                if (customers.size < total) item {
+                    TextButton(onClick = { page += 1 }, Modifier.fillMaxWidth()) { Text("Muat lebih banyak") }
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } })
 }
 
 @Composable
-private fun PaymentDialog(total: Long, onDismiss: () -> Unit, onComplete: (Map<String, Long>, Map<String, String>) -> Unit) {
+private fun PaymentDialog(total: Long, methods: List<Pair<String, String>>, onDismiss: () -> Unit, onComplete: (Map<String, Long>, Map<String, String>) -> Unit) {
     // All method state is plain String/label data — no sealed-class objects are captured
     // inside the composable lambdas, which avoids the recomposition NPE seen previously.
-    val methods: List<Pair<String, String>> = listOf(
-        "CASH" to "Tunai", "QRIS" to "QRIS", "TRANSFER" to "Transfer",
-        "DEBIT" to "Debit", "CREDIT_CARD" to "Kartu Kredit", "EWALLET" to "E-Wallet", "OTHER" to "Lainnya"
-    )
     fun labelOf(id: String): String = methods.firstOrNull { it.first == id }?.second ?: id
-    var methodId by remember { mutableStateOf("CASH") }
+    var methodId by remember(methods) { mutableStateOf(methods.firstOrNull()?.first ?: "") }
     var amount by remember { mutableStateOf(total.toString()) }
     var reference by remember { mutableStateOf("") }
     var tenders by remember { mutableStateOf(linkedMapOf<String, Long>()) }
@@ -374,16 +408,16 @@ private fun PaymentDialog(total: Long, onDismiss: () -> Unit, onComplete: (Map<S
     var error by remember { mutableStateOf<String?>(null) }
     val draft = PaymentAllocation.settle(tenders, total)
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Pembayaran • ${Money.fmt(total)}") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Pilih metode")
+        Text(if (methods.isEmpty()) "Tidak ada metode pembayaran aktif" else "Pilih metode")
         Column(Modifier.height(102.dp).verticalScroll(rememberScrollState())) { methods.forEach { (id, label) -> Row(Modifier.fillMaxWidth().clickable { methodId = id; amount = (total - draft.settled.values.sum()).coerceAtLeast(0).toString() }, verticalAlignment = Alignment.CenterVertically) { RadioButton(methodId == id, { methodId = id }); Text(label) } } }
         if (methodId == "QRIS") Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) { Text("QRIS manual: pastikan pembayaran diterima sebelum konfirmasi. Integrasi API QRIS dapat ditambahkan melalui SyncService di masa depan.", Modifier.padding(10.dp)) }
         OutlinedTextField(amount, { amount = it }, label = { Text("Nominal ${labelOf(methodId)}") }, singleLine = true)
         if (methodId != "CASH") OutlinedTextField(reference, { reference = it }, label = { Text("Nomor referensi (opsional)") }, singleLine = true)
         if (methodId == "CASH") Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf(10_000L,20_000L,50_000L,100_000L).forEach { n -> AssistChip(onClick = { amount = n.toString() }, label = { Text(Money.fmt(n)) }) }; AssistChip(onClick = { amount = total.toString() }, label = { Text("Uang pas") }) }
-        OutlinedButton(onClick = { val n = Money.parse(amount); if (n <= 0) error = "Nominal harus lebih besar dari 0" else { val copy = LinkedHashMap(tenders); copy[methodId] = (copy[methodId] ?: 0L) + n; tenders = copy; val refs = LinkedHashMap(references); if(reference.isNotBlank()) refs[methodId] = reference; references = refs; amount = (total - PaymentAllocation.settle(tenders, total).settled.values.sum()).coerceAtLeast(0).toString(); reference = "" } }, Modifier.fillMaxWidth()) { Text("TAMBAH PEMBAYARAN") }
+        OutlinedButton(onClick = { val n = Money.parse(amount); if (methodId.isBlank()) error = "Aktifkan metode pembayaran terlebih dahulu" else if (n <= 0) error = "Nominal harus lebih besar dari 0" else { val copy = LinkedHashMap(tenders); copy[methodId] = (copy[methodId] ?: 0L) + n; val candidate = PaymentAllocation.settle(copy, total); if (methodId != PaymentAllocation.CASH && candidate.settled.isEmpty()) { error = "Pembayaran non-tunai tidak boleh melebihi sisa tagihan" } else { tenders = copy; val refs = LinkedHashMap(references); if(reference.isNotBlank()) refs[methodId] = reference; references = refs; amount = (total - candidate.settled.values.sum()).coerceAtLeast(0).toString(); reference = ""; error = null } } }, Modifier.fillMaxWidth(), enabled = methods.isNotEmpty()) { Text("TAMBAH PEMBAYARAN") }
         if (tenders.isNotEmpty()) { Text("Pembayaran diterima", fontWeight = FontWeight.SemiBold); tenders.forEach { (m, n) -> Row(Modifier.fillMaxWidth()) { Text(m, Modifier.weight(1f)); Text(Money.fmt(n)); IconButton(onClick = { val c = LinkedHashMap(tenders); c.remove(m); tenders = c }) { Icon(Icons.Default.Close, "Hapus") } } } }
         val settled = PaymentAllocation.settle(tenders, total); TotalRow("Total tender", settled.tendered); if (settled.change > 0) TotalRow("Kembalian", settled.change); if (settled.shortfall > 0) Text("Kurang ${Money.fmt(settled.shortfall)}", color = MaterialTheme.colorScheme.error); error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    } }, confirmButton = { Button(onClick = { val settled = PaymentAllocation.settle(tenders, total); if(settled.shortfall > 0) error = "Pembayaran belum mencukupi" else onComplete(tenders, references) }) { Text("KONFIRMASI BAYAR") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } })
+    } }, confirmButton = { Button(onClick = { val settled = PaymentAllocation.settle(tenders, total); if(settled.shortfall > 0 || settled.settled.values.sum() != total) error = "Pembayaran belum valid atau belum mencukupi" else onComplete(tenders, references) }, enabled = methods.isNotEmpty()) { Text("KONFIRMASI BAYAR") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } })
 }
 
 @Composable

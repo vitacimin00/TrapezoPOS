@@ -85,6 +85,7 @@ import com.trapezo.pos.data.entity.ProductEntity
 import com.trapezo.pos.excel.ProductExcelService
 import com.trapezo.pos.utils.Money
 import com.trapezo.pos.utils.PhotoStorage
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -97,10 +98,14 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
     val scope = rememberCoroutineScope()
     val categoryList by AppGraph.products.categoriesFlow().collectAsStateWithLifecycle(initialValue = emptyList())
     var query by remember { mutableStateOf("") }
+    var debouncedQuery by remember { mutableStateOf("") }
     var sort by remember { mutableStateOf("name_asc") }
     var stockFilter by remember { mutableStateOf("ALL") }
+    var lifecycleFilter by remember { mutableStateOf("ACTIVE") }
     var categoryId by remember { mutableStateOf<Long?>(null) }
     var page by remember { mutableIntStateOf(0) }
+    var reloadKey by remember { mutableIntStateOf(0) }
+    var requestVersion by remember { mutableIntStateOf(0) }
     var total by remember { mutableIntStateOf(0) }
     var products by remember { mutableStateOf(emptyList<ProductEntity>()) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -111,20 +116,29 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
     var importPreview by remember { mutableStateOf<ProductExcelService.Preview?>(null) }
     val excel = remember { ProductExcelService(AppGraph.db) }
 
-    fun refresh(reset: Boolean = false) {
-        scope.launch {
-            val requestedPage = if (reset) 0 else page
-            val result = when (stockFilter) {
-                "LOW" -> AppGraph.products.lowStock().let { it to it.size }
-                "OUT" -> AppGraph.products.outOfStock().let { it to it.size }
-                else -> AppGraph.products.page(query, categoryId, false, sort, requestedPage)
-            }
-            if (reset) page = 0
-            products = result.first
-            total = result.second
-        }
+    fun reloadPageZero() {
+        page = 0
+        reloadKey++
     }
-    LaunchedEffect(query, sort, stockFilter, categoryId, page) { refresh() }
+
+    LaunchedEffect(query) {
+        delay(300)
+        debouncedQuery = query
+    }
+    LaunchedEffect(debouncedQuery, sort, stockFilter, lifecycleFilter, categoryId) {
+        page = 0
+    }
+    LaunchedEffect(debouncedQuery, sort, stockFilter, lifecycleFilter, categoryId, page, reloadKey) {
+        val version = ++requestVersion
+        val requestedPage = page
+        val result = AppGraph.products.filteredPage(
+            debouncedQuery, categoryId, lifecycleFilter, false, stockFilter, sort, requestedPage
+        )
+        if (version != requestVersion) return@LaunchedEffect
+        products = if (requestedPage == 0) result.first.distinctBy { it.id }
+        else (products + result.first).distinctBy { it.id }
+        total = result.second
+    }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
@@ -171,13 +185,14 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
                     TextButton(onClick = { message = null }) { Text("Tutup") }
                 }
             }
-            OutlinedTextField(query, { query = it; page = 0 }, label = { Text("Cari nama, SKU, atau barcode") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(query, { query = it }, label = { Text("Cari nama, SKU, atau barcode") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("ALL" to "Semua", "LOW" to "Stok rendah", "OUT" to "Stok habis").forEach { (id, label) ->
                     FilterChip(selected = stockFilter == id, onClick = { stockFilter = id; page = 0 }, label = { Text(label) })
                 }
                 SortMenu(sort) { sort = it; page = 0 }
                 CategoryFilterMenu(categoryList.filter { it.isActive }, categoryId) { categoryId = it; page = 0 }
+                LifecycleFilterMenu(lifecycleFilter) { lifecycleFilter = it; page = 0 }
                 if (canManage) AssistChip(onClick = { categoriesOpen = true }, label = { Text("Kategori") }, leadingIcon = { Icon(Icons.Default.MoreVert, null) })
             }
             if (canManage) Button(onClick = { createProduct = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Add, null); Spacer(Modifier.size(6.dp)); Text("TAMBAH PRODUK") }
@@ -187,11 +202,20 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(products, key = { it.id }) { product ->
                         ProductRow(product, canManage, onEdit = { showForm = product }, onAdjust = { adjustProduct = product }, onDeactivate = {
-                            scope.launch { AppGraph.products.softDelete(product); message = "Produk dinonaktifkan"; refresh(true) }
+                            scope.launch {
+                                if (product.isActive) {
+                                    AppGraph.products.softDelete(product)
+                                    message = "Produk dinonaktifkan"
+                                } else {
+                                    val r = AppGraph.products.save(product.copy(isActive = true))
+                                    message = r.error ?: "Produk diaktifkan"
+                                }
+                                reloadPageZero()
+                            }
                         })
                     }
                     item {
-                        if (stockFilter == "ALL" && total > (page + 1) * 50) TextButton(onClick = { page++ }, Modifier.fillMaxWidth()) { Text("Muat lebih banyak") }
+                        if (products.size < total) TextButton(onClick = { page++ }, Modifier.fillMaxWidth()) { Text("Muat lebih banyak") }
                     }
                 }
             }
@@ -200,23 +224,23 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
     if (createProduct) ProductEditorDialog(null, categoryList, onDismiss = { createProduct = false }, onSave = { product ->
         scope.launch {
             val r = AppGraph.products.save(product)
-            if (r.ok) { createProduct = false; message = "Produk tersimpan"; refresh(true) } else message = r.error
+            if (r.ok) { createProduct = false; message = "Produk tersimpan"; reloadPageZero() } else message = r.error
         }
     })
     showForm?.let { existing -> ProductEditorDialog(existing, categoryList, onDismiss = { showForm = null }, onSave = { product ->
         scope.launch {
             val r = AppGraph.products.save(product)
-            if (r.ok) { showForm = null; message = "Produk diperbarui"; refresh(true) } else message = r.error
+            if (r.ok) { showForm = null; message = "Produk diperbarui"; reloadPageZero() } else message = r.error
         }
     }) }
-    adjustProduct?.let { product -> StockAdjustDialog(product, userId, onDismiss = { adjustProduct = null }, onSaved = { text -> adjustProduct = null; message = text; refresh(true) }) }
+    adjustProduct?.let { product -> StockAdjustDialog(product, userId, onDismiss = { adjustProduct = null }, onSaved = { text -> adjustProduct = null; message = text; reloadPageZero() }) }
     if (categoriesOpen) CategoryManagerDialog(categoryList, onDismiss = { categoriesOpen = false }, onMessage = { message = it })
     importPreview?.let { preview -> ExcelPreviewDialog(preview, onDismiss = { importPreview = null }, onConfirm = { duplicate, category ->
         scope.launch {
             val r = excel.import(preview, duplicate, category, userId)
             importPreview = null
             message = "Import selesai: ${r.imported} baru, ${r.updated} diperbarui, ${r.skipped} dilewati, ${r.failed} gagal"
-            refresh(true)
+            reloadPageZero()
         }
     }) }
 }
@@ -251,6 +275,28 @@ private fun CategoryFilterMenu(categories: List<CategoryEntity>, selected: Long?
 }
 
 @Composable
+private fun LifecycleFilterMenu(selected: String, onSelected: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val label = when (selected) {
+        "INACTIVE" -> "Nonaktif"
+        "ALL" -> "Semua"
+        else -> "Aktif"
+    }
+    Box {
+        AssistChip(
+            onClick = { open = true },
+            label = { Text("Status: $label") },
+            trailingIcon = { Icon(Icons.Default.ArrowDropDown, null) }
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            listOf("ACTIVE" to "Aktif", "INACTIVE" to "Nonaktif", "ALL" to "Semua").forEach { (id, text) ->
+                DropdownMenuItem(text = { Text(text) }, onClick = { onSelected(id); open = false })
+            }
+        }
+    }
+}
+
+@Composable
 private fun LocalProductPhoto(path: String, description: String, modifier: Modifier = Modifier) {
     val bitmap = remember(path) { BitmapFactory.decodeFile(path) }
     if (bitmap != null) Image(bitmap = bitmap.asImageBitmap(), contentDescription = description, contentScale = ContentScale.Crop, modifier = modifier)
@@ -279,7 +325,7 @@ private fun ProductRow(product: ProductEntity, canManage: Boolean, onEdit: () ->
                 DropdownMenu(menu, { menu = false }) {
                     DropdownMenuItem(text = { Text("Edit") }, leadingIcon = { Icon(Icons.Default.Edit, null) }, onClick = { menu = false; onEdit() })
                     DropdownMenuItem(text = { Text("Adjustment stok") }, leadingIcon = { Icon(Icons.Default.Inventory, null) }, onClick = { menu = false; onAdjust() })
-                    DropdownMenuItem(text = { Text("Nonaktifkan") }, leadingIcon = { Icon(Icons.Default.Delete, null) }, onClick = { menu = false; onDeactivate() })
+                    DropdownMenuItem(text = { Text(if (product.isActive) "Nonaktifkan" else "Aktifkan") }, leadingIcon = { Icon(Icons.Default.Delete, null) }, onClick = { menu = false; onDeactivate() })
                 }
             }
         }
@@ -348,7 +394,7 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
                     Field("Loyalty points", draft.loyalty, numeric = true) { draft = draft.copy(loyalty = it) }
                     Field("Deskripsi", draft.description, single = false) { draft = draft.copy(description = it) }
                     Field("Catatan", draft.notes, single = false) { draft = draft.copy(notes = it) }
-                    Toggle("Produk aktif/published", draft.published) { draft = draft.copy(published = it) }
+                    Toggle("Metadata published (tidak mengatur status aktif)", draft.published) { draft = draft.copy(published = it) }
                     Toggle("Sembunyikan dari POS", draft.hidden) { draft = draft.copy(hidden = it) }
                     Toggle("Bebas pajak", draft.taxFree) { draft = draft.copy(taxFree = it) }
                     Toggle("Tidak kena service charge", draft.nonService) { draft = draft.copy(nonService = it) }

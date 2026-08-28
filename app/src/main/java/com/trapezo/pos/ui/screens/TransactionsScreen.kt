@@ -52,11 +52,13 @@ import com.trapezo.pos.data.entity.SaleItemEntity
 import com.trapezo.pos.data.entity.UserEntity
 import com.trapezo.pos.data.repository.RefundRepository
 import com.trapezo.pos.data.repository.SalesRepository
+import com.trapezo.pos.domain.model.RefundPreview
 import com.trapezo.pos.printer.BluetoothPrinterService
 import com.trapezo.pos.printer.ReceiptService
 import com.trapezo.pos.printer.receiptInfo
 import com.trapezo.pos.utils.Dates
 import com.trapezo.pos.utils.Money
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,16 +68,27 @@ fun TransactionsScreen(user: UserEntity) {
     var query by remember { mutableStateOf("") }; var method by remember { mutableStateOf<String?>(null) }; var status by remember { mutableStateOf<String?>(null) }
     var fromMs by remember { mutableStateOf<Long?>(null) }; var toMs by remember { mutableStateOf<Long?>(null) }
     var cashierId by remember { mutableStateOf<Long?>(null) }; var cashiers by remember { mutableStateOf(emptyList<UserEntity>()) }
+    var paymentMethods by remember { mutableStateOf(emptyList<com.trapezo.pos.data.entity.PaymentMethodEntity>()) }
     var pickFrom by remember { mutableStateOf(false) }; var pickTo by remember { mutableStateOf(false) }
     var sales by remember { mutableStateOf(emptyList<SaleEntity>()) }; var total by remember { mutableStateOf(0) }; var page by remember { mutableStateOf(0) }
+    var debouncedQuery by remember { mutableStateOf("") }; var requestVersion by remember { mutableStateOf(0L) }
     var selectedId by remember { mutableStateOf<Long?>(null) }; var message by remember { mutableStateOf<String?>(null) }
-    fun refresh(reset:Boolean=false) { scope.launch { val p=if(reset) 0 else page; val r=AppGraph.sales.history(SalesRepository.HistoryFilters(fromMs=fromMs,toMs=toMs,cashierUserId=cashierId,method=method,status=status,queryInvoice=query),p); sales=r.first; total=r.second; if(reset) page=0 } }
-    LaunchedEffect(query,method,status,page,fromMs,toMs,cashierId) { refresh() }
-    LaunchedEffect(Unit) { scope.launch { cashiers = AppGraph.users.all() } }
+    fun resetResults() { page = 0; requestVersion++ }
+    LaunchedEffect(query) { delay(300); debouncedQuery = query; resetResults() }
+    LaunchedEffect(debouncedQuery,method,status,page,fromMs,toMs,cashierId,requestVersion) {
+        val requestedPage = page; val version = requestVersion
+        val filters = SalesRepository.HistoryFilters(fromMs=fromMs,toMs=toMs,cashierUserId=cashierId,method=method,status=status,queryInvoice=debouncedQuery)
+        val r = AppGraph.sales.history(filters, requestedPage)
+        val current = SalesRepository.HistoryFilters(fromMs=fromMs,toMs=toMs,cashierUserId=cashierId,method=method,status=status,queryInvoice=debouncedQuery)
+        if (requestedPage == page && version == requestVersion && filters == current) {
+            sales = if (requestedPage == 0) r.first else (sales + r.first).distinctBy { it.id }; total = r.second
+        }
+    }
+    LaunchedEffect(Unit) { cashiers = AppGraph.users.all(); paymentMethods = AppGraph.db.paymentMethodDao().all() }
     Scaffold(topBar={ TopAppBar(title={Text("Transaksi",fontWeight=FontWeight.Bold)}) }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             message?.let { TransactionNotice(it) { message=null } }
-            OutlinedTextField(query,{query=it;page=0},label={Text("Cari invoice")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(query,{query=it},label={Text("Cari invoice")},singleLine=true,modifier=Modifier.fillMaxWidth())
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement=Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilterChip(selected=fromMs==null&&toMs==null,onClick={fromMs=null;toMs=null;page=0},label={Text("Semua tanggal")})
                 FilterChip(selected=fromMs!=null,onClick={pickFrom=true},label={Text(if(fromMs!=null) "Dari ${Dates.dmy(fromMs!!)}" else "Dari…")})
@@ -83,7 +96,7 @@ fun TransactionsScreen(user: UserEntity) {
             }
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                 FilterChip(selected=method==null,onClick={method=null;page=0},label={Text("Semua metode")})
-                listOf("CASH" to "Tunai","QRIS" to "QRIS","TRANSFER" to "Transfer","DEBIT" to "Debit","CREDIT_CARD" to "Kartu Kredit","EWALLET" to "E-Wallet","OTHER" to "Lainnya").forEach{(id,label)->FilterChip(selected=method==id,onClick={method=id;page=0},label={Text(label)})}
+                paymentMethods.forEach { payment -> FilterChip(selected=method==payment.type,onClick={method=payment.type;page=0},label={Text(payment.name)}) }
             }
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                 listOf(null to "Semua status", "COMPLETED" to "Selesai", "PARTIALLY_REFUNDED" to "Sebagian refund", "REFUNDED" to "Refund").forEach{(id,label)->FilterChip(selected=status==id,onClick={status=id;page=0},label={Text(label)})}
@@ -96,11 +109,11 @@ fun TransactionsScreen(user: UserEntity) {
             }
             if(sales.isEmpty()) Text("Belum ada transaksi yang sesuai.",Modifier.padding(16.dp)) else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(7.dp)) {
                 items(sales,key={it.id}) { sale -> Card(Modifier.fillMaxWidth().clickable { selectedId=sale.id }) { Row(Modifier.padding(12.dp),verticalAlignment=Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(sale.invoiceNumber,fontWeight=FontWeight.SemiBold); Text("${Dates.dmyhm(sale.createdAt)} • ${sale.userNameSnapshot}",style=MaterialTheme.typography.bodySmall); Text(sale.transactionStatus,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary) }; Column(horizontalAlignment=Alignment.End) { Text(Money.fmt(sale.grandTotal),fontWeight=FontWeight.Bold); Text(sale.paymentStatus,style=MaterialTheme.typography.labelSmall) } } } }
-                item { if(total>(page+1)*40) TextButton(onClick={page++},modifier=Modifier.fillMaxWidth()){Text("Muat lebih banyak")} }
+                item { if(sales.size<total) TextButton(onClick={page++},modifier=Modifier.fillMaxWidth()){Text("Muat lebih banyak")} }
             }
         }
     }
-    selectedId?.let { id -> TransactionDetailDialog(id,user,onDismiss={selectedId=null},onMessage={message=it;selectedId=null},onShare = { sale, items, payments ->
+    selectedId?.let { id -> TransactionDetailDialog(id,user,onDismiss={selectedId=null},onMessage={message=it;selectedId=null;resetResults()},onShare = { sale, items, payments ->
         scope.launch {
             val receipt = ReceiptService(context)
             val file = receipt.createPdf(receiptInfo(AppGraph.store, AppGraph.settings), sale, items, payments)
@@ -196,7 +209,7 @@ private fun TransactionDetailDialog(
                     TextButton(onClick = { onPrint(sale, items, payments) }) { Text("CETAK ULANG") }
                     TextButton(onClick = { onShare(sale, items, payments) }) { Text("BAGIKAN STRUK") }
                 }
-                if (sale.transactionStatus == "COMPLETED" || sale.transactionStatus == "PARTIALLY_REFUNDED") {
+                if (user.role == "ADMIN" && (sale.transactionStatus == "COMPLETED" || sale.transactionStatus == "PARTIALLY_REFUNDED")) {
                     TextButton(onClick = { refundOpen = true }) { Text("REFUND") }
                 }
             }
@@ -223,10 +236,30 @@ private fun RefundDialog(
     onResult: (String) -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    var quantities by remember { mutableStateOf(items.associate { it.id to it.quantity.toString() }) }
-    var selected by remember { mutableStateOf(items.associate { it.id to true }) }
+    var state by remember { mutableStateOf<RefundRepository.PreviewState?>(null) }
+    var quantities by remember { mutableStateOf(emptyMap<Long, String>()) }
+    var selected by remember { mutableStateOf(emptyMap<Long, Boolean>()) }
     var reason by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var confirm by remember { mutableStateOf(false) }
+    LaunchedEffect(sale.id) {
+        state = AppGraph.refunds.previewState(sale.id)
+        quantities = state?.lines?.associate { it.saleItemId to "" }.orEmpty()
+        selected = state?.lines?.associate { it.saleItemId to false }.orEmpty()
+    }
+    val previewState = state
+    if (previewState == null) {
+        AlertDialog(onDismissRequest=onDismiss,title={Text("Refund ${sale.invoiceNumber}")},text={Text("Memuat data refund…")},confirmButton={},dismissButton={TextButton(onClick=onDismiss){Text("Batal")}})
+        return
+    }
+    val requested = previewState.lines.associate { line ->
+        line.saleItemId to if (selected[line.saleItemId] == true) (quantities[line.saleItemId]?.toLongOrNull() ?: 0L) else 0L
+    }
+    val preview = RefundPreview.preview(previewState.sale.grandTotal, previewState.alreadyRefundedTotal, previewState.lines, requested)
+    val valid = reason.isNotBlank() && previewState.lines.any { line ->
+        val qty = requested[line.saleItemId] ?: 0L
+        qty in 1..line.remainingQuantity
+    } && preview.currentRefundTotal > 0L && previewState.lines.all { line -> (requested[line.saleItemId] ?: 0L) <= line.remainingQuantity }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Refund ${sale.invoiceNumber}") },
@@ -235,21 +268,32 @@ private fun RefundDialog(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text("Refund disimpan sebagai record baru dan stok dikembalikan.", style = MaterialTheme.typography.bodySmall)
-                items.forEach { item ->
+                TotalRow("Total awal", preview.saleGrandTotal)
+                TotalRow("Sudah direfund", preview.alreadyRefundedTotal)
+                TotalRow("Sisa nilai", preview.remainingSaleValue)
+                TotalRow("Refund saat ini", preview.currentRefundTotal)
+                previewState.lines.forEach { line ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.material3.Checkbox(
-                            checked = selected[item.id] ?: false,
-                            onCheckedChange = { checked -> selected = selected.toMutableMap().apply { put(item.id, checked) } }
+                            checked = selected[line.saleItemId] ?: false,
+                            enabled = !line.fullyRefunded,
+                            onCheckedChange = { checked ->
+                                selected = selected.toMutableMap().apply { put(line.saleItemId, checked) }
+                                quantities = quantities.toMutableMap().apply {
+                                    put(line.saleItemId, if (checked) line.remainingQuantity.toString() else "")
+                                }
+                            }
                         )
                         Column(Modifier.weight(1f)) {
-                            Text(item.productNameSnapshot)
-                            Text("Terjual ${item.quantity}", style = MaterialTheme.typography.bodySmall)
+                            Text(line.productName)
+                            Text("Terjual ${line.soldQuantity} • Direfund ${line.alreadyRefundedQuantity} • Sisa ${line.remainingQuantity}", style = MaterialTheme.typography.bodySmall)
+                            Text("Sisa nilai net ${Money.fmt(line.remainingRefundableAmount)}", style = MaterialTheme.typography.bodySmall)
                         }
                         OutlinedTextField(
-                            value = quantities[item.id].orEmpty(),
-                            onValueChange = { value -> quantities = quantities.toMutableMap().apply { put(item.id, value) } },
+                            value = quantities[line.saleItemId].orEmpty(),
+                            onValueChange = { value -> quantities = quantities.toMutableMap().apply { put(line.saleItemId, value.filter(Char::isDigit)) } },
                             label = { Text("Qty") },
+                            enabled = !line.fullyRefunded && selected[line.saleItemId] == true,
                             singleLine = true,
                             modifier = Modifier.width(92.dp)
                         )
@@ -260,19 +304,22 @@ private fun RefundDialog(
             }
         },
         confirmButton = {
-            Button(onClick = {
-                val requested = items.filter { selected[it.id] == true }.map {
-                    RefundRepository.RequestedItem(it, quantities[it.id]?.toLongOrNull() ?: 0)
-                }
-                scope.launch {
-                    when (val result = AppGraph.refunds.refund(sale.id, user.id, requested, reason)) {
-                        is RefundRepository.Result.Success -> onResult("Refund ${Money.fmt(result.total)} berhasil; stok dikembalikan")
-                        is RefundRepository.Result.Error -> error = result.message
-                    }
-                }
-            }) { Text("KONFIRMASI REFUND") }
+            Button(onClick = { confirm = true }, enabled = valid) { Text("LANJUTKAN") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Batal") } }
+    )
+    if (confirm) AlertDialog(
+        onDismissRequest={confirm=false}, title={Text("Konfirmasi refund")},
+        text={Text("Refund ${Money.fmt(preview.currentRefundTotal)} akan diproses. Tindakan ini tidak dapat dibatalkan.")},
+        confirmButton={Button(onClick={
+            confirm=false
+            val itemById = items.associateBy { it.id }
+            val rows = requested.filterValues { it > 0 }.mapNotNull { (id, qty) -> itemById[id]?.let { RefundRepository.RequestedItem(it, qty) } }
+            scope.launch { when(val result=AppGraph.refunds.refund(sale.id,user.id,rows,reason)) {
+                is RefundRepository.Result.Success -> onResult("Refund ${Money.fmt(result.total)} berhasil; stok dikembalikan")
+                is RefundRepository.Result.Error -> error=result.message
+            } }
+        }){Text("YA, PROSES REFUND")}}, dismissButton={TextButton(onClick={confirm=false}){Text("KEMBALI")}}
     )
 }
 

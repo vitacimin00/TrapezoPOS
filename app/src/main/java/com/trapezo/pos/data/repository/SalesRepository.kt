@@ -77,8 +77,12 @@ class SalesRepository(
         val totals = pricing.totals
 
         val allocation = PaymentAllocation.settle(paidByMethod, totals.grandTotal)
-        if (allocation.shortfall > 0) {
-            return@withContext CheckoutResult.Failure("Total dibayar kurang dari tagihan")
+        if (allocation.shortfall > 0 || allocation.settled.values.sum() != totals.grandTotal) {
+            return@withContext CheckoutResult.Failure(
+                if (paidByMethod.any { (method, amount) -> method != PaymentAllocation.CASH && amount > totals.grandTotal })
+                    "Pembayaran non-tunai tidak boleh melebihi tagihan"
+                else "Total dibayar kurang dari tagihan atau alokasi pembayaran tidak valid"
+            )
         }
 
         try {

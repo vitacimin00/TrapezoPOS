@@ -82,7 +82,12 @@ fun ReportsScreen() {
     var pickFrom by remember { mutableStateOf(false) }
     var pickTo by remember { mutableStateOf(false) }
     var state by remember { mutableStateOf(ReportState()) }
+    val customPeriodInvalid = period == "CUSTOM" && fromMs != null && toMs != null && fromMs!! > toMs!!
     LaunchedEffect(period, fromMs, toMs) {
+        if (customPeriodInvalid) {
+            state = ReportState()
+            return@LaunchedEffect
+        }
         withContext(Dispatchers.IO) {
             val (from, to) = when (period) {
                 "WEEK" -> Dates.daysAgoStart(6) to Dates.endOfDay()
@@ -99,8 +104,8 @@ fun ReportsScreen() {
                 topProducts = AppGraph.sales.topProducts(from, to),
                 cashiers = AppGraph.sales.cashierPerformance(from, to),
                 daily = localDailyTotals(from, to),
-                shifts = AppGraph.db.shiftDao().allShifts(50, 0),
-                cashMovements = AppGraph.db.shiftDao().allCashMovements(50, 0)
+                shifts = AppGraph.db.shiftDao().shiftsOverlapping(from, to, 50, 0),
+                cashMovements = AppGraph.db.shiftDao().cashMovementsBetween(from, to, 50, 0)
             )
         }
     }
@@ -115,16 +120,21 @@ fun ReportsScreen() {
             }
             if (period == "CUSTOM") {
                 item {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        FilterChip(selected = fromMs != null, onClick = { pickFrom = true }, label = { Text(if (fromMs != null) "Dari ${Dates.dmy(fromMs!!)}" else "Dari…") })
-                        FilterChip(selected = toMs != null, onClick = { pickTo = true }, label = { Text(if (toMs != null) "Sampai ${Dates.dmy(toMs!!)}" else "Sampai…") })
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            FilterChip(selected = fromMs != null, onClick = { pickFrom = true }, label = { Text(if (fromMs != null) "Dari ${Dates.dmy(fromMs!!)}" else "Dari…") })
+                            FilterChip(selected = toMs != null, onClick = { pickTo = true }, label = { Text(if (toMs != null) "Sampai ${Dates.dmy(toMs!!)}" else "Sampai…") })
+                        }
+                        if (customPeriodInvalid) {
+                            Text("Tanggal awal tidak boleh setelah tanggal akhir.", color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
             }
             item { Text("Laporan penjualan", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ReportMetric("Penjualan", Money.fmt(state.total.total), Modifier.weight(1f))
+                    ReportMetric("Penjualan bersih (setelah refund)", Money.fmt(state.total.total), Modifier.weight(1f))
                     ReportMetric("Transaksi", state.total.cnt.toString(), Modifier.weight(1f))
                     ReportMetric("Item", state.items.toString(), Modifier.weight(1f))
                 }
@@ -184,7 +194,7 @@ fun ReportsScreen() {
                     Text(if (m.type == "CASH_IN") "+${Money.fmt(m.amount)}" else "-${Money.fmt(m.amount)}", fontWeight = FontWeight.Bold, color = if (m.type == "CASH_IN") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                 }
             }
-            item { SectionTitle("Stok") }
+            item { SectionTitle("Stok saat ini (snapshot, bukan periode)") }
             item { StockReport() }
         }
     }

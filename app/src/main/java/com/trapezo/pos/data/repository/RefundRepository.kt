@@ -22,6 +22,29 @@ class RefundRepository(private val db: AppDatabase) {
 
     private data class PendingLine(val item: SaleItemEntity, val quantity: Long, val amount: Long)
 
+    /** Authoritative refund preview state for the refund dialog (read-only, no writes). */
+    data class PreviewState(
+        val sale: com.trapezo.pos.data.entity.SaleEntity,
+        val alreadyRefundedTotal: Long,
+        val lines: List<com.trapezo.pos.domain.model.RefundPreview.Line>
+    )
+
+    suspend fun previewState(saleId: Long): PreviewState? = withContext(Dispatchers.IO) {
+        val sale = db.saleDao().saleById(saleId) ?: return@withContext null
+        val alreadyRefundedTotal = db.refundDao().refundedTotalFor(saleId)
+        val lines = db.saleDao().itemsFor(saleId).map { item ->
+            com.trapezo.pos.domain.model.RefundPreview.Line(
+                saleItemId = item.id,
+                productName = item.productNameSnapshot,
+                soldQuantity = item.quantity,
+                alreadyRefundedQuantity = db.refundDao().refundedQtyFor(item.id),
+                alreadyRefundedAmount = db.refundDao().refundedAmountFor(item.id),
+                lineNetTotal = item.netTotal
+            )
+        }
+        PreviewState(sale = sale, alreadyRefundedTotal = alreadyRefundedTotal, lines = lines)
+    }
+
     suspend fun refund(
         saleId: Long,
         userId: Long,

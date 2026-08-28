@@ -72,6 +72,51 @@ interface ProductDao {
     )
     suspend fun countPage(query: String, categoryId: Long?, includeInactive: Boolean): Int
 
+    // ---- unified inventory-aware listing (Track D) ----
+    // stockState: ALL = no stock filter; LOW = trackInventory=1 AND stockQty>0 AND stockQty<=lowStockAlert; OUT = trackInventory=1 AND stockQty<=0
+    @Query(
+        """SELECT * FROM products
+           WHERE (:lifecycle = 'ALL' OR (:lifecycle = 'ACTIVE' AND isActive = 1) OR (:lifecycle = 'INACTIVE' AND isActive = 0))
+             AND (:trackedOnly = 0 OR trackInventory = 1)
+             AND (:categoryId IS NULL OR categoryId = :categoryId)
+             AND (:stockState = 'ALL' OR
+                  (:stockState = 'LOW' AND trackInventory = 1 AND stockQty > 0 AND stockQty <= lowStockAlert) OR
+                  (:stockState = 'OUT' AND trackInventory = 1 AND stockQty <= 0))
+             AND (:query = '' OR name LIKE '%'||:query||'%' COLLATE NOCASE
+                             OR alternativeName LIKE '%'||:query||'%' COLLATE NOCASE
+                             OR sku LIKE '%'||:query||'%' COLLATE NOCASE
+                             OR barcode LIKE '%'||:query||'%')
+           ORDER BY CASE WHEN :sort = 'name_asc' THEN name END ASC,
+                    CASE WHEN :sort = 'name_desc' THEN name END DESC,
+                    CASE WHEN :sort = 'price_asc' THEN sellPrice END ASC,
+                    CASE WHEN :sort = 'price_desc' THEN sellPrice END DESC,
+                    CASE WHEN :sort = 'stock_asc' THEN stockQty END ASC,
+                    CASE WHEN :sort = 'stock_desc' THEN stockQty END DESC,
+                    name ASC
+           LIMIT :limit OFFSET :offset"""
+    )
+    suspend fun filteredPage(
+        query: String, categoryId: Long?, lifecycle: String, trackedOnly: Boolean,
+        stockState: String, sort: String, limit: Int, offset: Int
+    ): List<ProductEntity>
+
+    @Query(
+        """SELECT COUNT(*) FROM products
+           WHERE (:lifecycle = 'ALL' OR (:lifecycle = 'ACTIVE' AND isActive = 1) OR (:lifecycle = 'INACTIVE' AND isActive = 0))
+             AND (:trackedOnly = 0 OR trackInventory = 1)
+             AND (:categoryId IS NULL OR categoryId = :categoryId)
+             AND (:stockState = 'ALL' OR
+                  (:stockState = 'LOW' AND trackInventory = 1 AND stockQty > 0 AND stockQty <= lowStockAlert) OR
+                  (:stockState = 'OUT' AND trackInventory = 1 AND stockQty <= 0))
+             AND (:query = '' OR name LIKE '%'||:query||'%' COLLATE NOCASE
+                             OR alternativeName LIKE '%'||:query||'%' COLLATE NOCASE
+                             OR sku LIKE '%'||:query||'%' COLLATE NOCASE
+                             OR barcode LIKE '%'||:query||'%')"""
+    )
+    suspend fun countFiltered(
+        query: String, categoryId: Long?, lifecycle: String, trackedOnly: Boolean, stockState: String
+    ): Int
+
     // ---- barcode / sku lookups (fast paths, indexed columns) ----
     @Query("SELECT * FROM products WHERE barcode=:barcode AND isActive=1 LIMIT 1")
     suspend fun byBarcode(barcode: String): ProductEntity?
@@ -156,6 +201,46 @@ interface InventoryDao {
 
     @Query("SELECT * FROM inventory_movements ORDER BY createdAt DESC LIMIT :limit OFFSET :offset")
     suspend fun recent(limit: Int, offset: Int): List<InventoryMovementEntity>
+
+    /** Movement rows joined with product names in a single query (no N+1). */
+    @Query(
+        """SELECT m.id AS id, m.productId AS productId, m.type AS type, m.quantity AS quantity,
+                  m.referenceId AS referenceId, m.note AS note, m.userId AS userId, m.createdAt AS createdAt,
+                  p.name AS productName
+           FROM inventory_movements m
+           LEFT JOIN products p ON p.id = m.productId
+           ORDER BY m.id DESC
+           LIMIT :limit OFFSET :offset"""
+    )
+    suspend fun recentWithProductName(limit: Int, offset: Int): List<MovementWithProduct>
+}
+
+/** Projection for movement history with the current product name resolved by SQL join. */
+data class MovementWithProduct(
+    val id: Long,
+    val productId: Long,
+    val type: String,
+    val quantity: Long,
+    val referenceId: Long?,
+    val note: String,
+    val userId: Long?,
+    val createdAt: Long,
+    val productName: String?
+)
+
+@Dao
+interface PaymentMethodDao {
+    @Query("SELECT * FROM payment_methods ORDER BY id ASC")
+    suspend fun all(): List<com.trapezo.pos.data.entity.PaymentMethodEntity>
+
+    @Query("SELECT * FROM payment_methods WHERE isActive=1 ORDER BY id ASC")
+    suspend fun active(): List<com.trapezo.pos.data.entity.PaymentMethodEntity>
+
+    @Query("SELECT * FROM payment_methods WHERE type=:type LIMIT 1")
+    suspend fun byType(type: String): com.trapezo.pos.data.entity.PaymentMethodEntity?
+
+    @Query("UPDATE payment_methods SET isActive=:active WHERE id=:id")
+    suspend fun setActive(id: Long, active: Boolean)
 }
 
 @Dao

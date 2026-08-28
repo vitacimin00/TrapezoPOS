@@ -251,6 +251,33 @@ interface ShiftDao {
 
     @Query("SELECT * FROM cash_movements ORDER BY createdAt DESC LIMIT :limit OFFSET :offset")
     suspend fun allCashMovements(limit: Int, offset: Int): List<CashMovementEntity>
+
+    /** Shifts overlapping the report window: opened before window end, closed (if at all) after window start. */
+    @Query(
+        """SELECT * FROM shifts
+           WHERE openedAt <= :to AND (closedAt IS NULL OR closedAt >= :from)
+           ORDER BY openedAt DESC
+           LIMIT :limit OFFSET :offset"""
+    )
+    suspend fun shiftsOverlapping(from: Long, to: Long, limit: Int, offset: Int): List<ShiftEntity>
+
+    @Query(
+        """SELECT COUNT(*) FROM shifts
+           WHERE openedAt <= :to AND (closedAt IS NULL OR closedAt >= :from)"""
+    )
+    suspend fun countShiftsOverlapping(from: Long, to: Long): Int
+
+    /** Cash movements within the report period. */
+    @Query(
+        """SELECT * FROM cash_movements
+           WHERE createdAt BETWEEN :from AND :to
+           ORDER BY createdAt DESC
+           LIMIT :limit OFFSET :offset"""
+    )
+    suspend fun cashMovementsBetween(from: Long, to: Long, limit: Int, offset: Int): List<CashMovementEntity>
+
+    @Query("SELECT COUNT(*) FROM cash_movements WHERE createdAt BETWEEN :from AND :to")
+    suspend fun countCashMovementsBetween(from: Long, to: Long): Int
 }
 
 @Dao
