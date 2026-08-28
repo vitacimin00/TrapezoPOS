@@ -26,6 +26,8 @@ android {
         versionCode = 1
         versionName = "1.0.0"
 
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -99,6 +101,13 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     testImplementation("junit:junit:4.13.2")
+
+    androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:monitor:1.7.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.room:room-testing:2.7.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

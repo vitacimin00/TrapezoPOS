@@ -19,6 +19,16 @@ import java.util.zip.ZipOutputStream
  */
 object XlsxModule {
 
+    /** Hard resource limits defending against zip bombs and pathological workbooks. */
+    object Limits {
+        const val MAX_ENTRIES = 1024
+        const val MAX_COMPRESSED_ENTRY_BYTES = 32L * 1024 * 1024
+        const val MAX_TOTAL_EXPANDED_BYTES = 96L * 1024 * 1024
+        const val MAX_ROWS = 100_000
+        const val MAX_COLUMNS = 256
+        const val MAX_CELL_STRING = 16_000
+    }
+
     // ---------- public result types ----------
     class SheetRef(val name: String, val entryPath: String)
 
@@ -102,13 +112,21 @@ object XlsxModule {
     fun read(stream: InputStream, preferSheet: String? = null): ReadResult {
         // Load zip entries to memory (import files are small)
         val entries = HashMap<String, ByteArray>()
+        var entryCount = 0
+        var totalExpanded = 0L
         ZipInputStream(stream.buffered()).use { zin ->
             var e: ZipEntry? = zin.nextEntry
             while (e != null) {
                 if (!e.isDirectory) {
+                    entryCount++
+                    if (entryCount > Limits.MAX_ENTRIES) throw IllegalArgumentException("File Excel terlalu banyak entri")
+                    if (e.size > Limits.MAX_COMPRESSED_ENTRY_BYTES) throw IllegalArgumentException("File Excel mengandung entri terlalu besar")
                     val name = e.name.replace('\\', '/')
                     if (!name.startsWith("xl/media/") && !name.startsWith("xl/drawings/")) {
-                        entries[name] = zin.readBytes()
+                        val bytes = readBounded(zin)
+                        totalExpanded += bytes.size
+                        if (totalExpanded > Limits.MAX_TOTAL_EXPANDED_BYTES) throw IllegalArgumentException("File Excel terlalu besar setelah diekstrak")
+                        entries[name] = bytes
                     }
                 }
                 e = zin.nextEntry
@@ -189,7 +207,10 @@ object XlsxModule {
         var maxCols = 0
         val epoch1904 = wbXml.contains("date1904=\"1\"") || wbXml.contains("date1904=\"true\"")
 
+        var rowCount = 0
         Regex("<row[^>]*>(.*?)</row>|<row[^>]*/>", RegexOption.DOT_MATCHES_ALL).findAll(sheetXml).forEach { rm ->
+            rowCount++
+            if (rowCount > Limits.MAX_ROWS) throw IllegalArgumentException("File Excel melebihi batas baris")
             val inner = rm.groupValues.getOrElse(1) { "" }
             if (inner.isEmpty()) return@forEach
             val cells = ArrayList<RawCell>()
@@ -234,9 +255,10 @@ object XlsxModule {
             }
             if (cells.isNotEmpty()) {
                 val lastCol = cells.maxOf { it.col }
+                if (lastCol + 1 > Limits.MAX_COLUMNS) throw IllegalArgumentException("File Excel melebihi batas kolom")
                 if (lastCol + 1 > maxCols) maxCols = lastCol + 1
                 val arr = arrayOfNulls<String>(lastCol + 1)
-                for (c in cells) arr[c.col] = c.value
+                for (c in cells) arr[c.col] = c.value?.take(Limits.MAX_CELL_STRING)
                 outRows.add(arr.toList())
             }
         }
@@ -259,6 +281,20 @@ object XlsxModule {
             dataRows.add(m)
         }
         return ReadResult(orderedSheets.map { it.name }, chosen.name, usedHeaders, dataRows, outRows.size - headerIdx - 1)
+    }
+
+    private fun readBounded(zin: InputStream): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            val n = zin.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > Limits.MAX_TOTAL_EXPANDED_BYTES) throw IllegalArgumentException("File Excel terlalu besar setelah diekstrak")
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     private fun unesc(s: String): String = s

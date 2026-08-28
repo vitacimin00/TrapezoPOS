@@ -9,13 +9,14 @@ import androidx.core.content.FileProvider
 import com.trapezo.pos.data.entity.PaymentEntity
 import com.trapezo.pos.data.entity.SaleEntity
 import com.trapezo.pos.data.entity.SaleItemEntity
-import com.trapezo.pos.utils.Dates
-import com.trapezo.pos.utils.Money
 import java.io.File
 
 /**
  * Receipt renderer for 58/80mm thermal format. It supplies both printable
  * ESC/POS payloads and an honest, shareable PDF fallback.
+ *
+ * Pure formatting lives in [ReceiptRenderer] (context-free, unit-testable); this
+ * class owns only the Context-dependent PDF/share paths.
  */
 class ReceiptService(private val context: Context) {
     data class StoreReceiptInfo(
@@ -35,58 +36,14 @@ class ReceiptService(private val context: Context) {
         sale: SaleEntity,
         items: List<SaleItemEntity>,
         payments: List<PaymentEntity>
-    ): String = buildString {
-        val width = if (store.paperMm == 58) 32 else 42
-        fun center(value: String) {
-            val clipped = value.take(width)
-            append(clipped.padStart((width + clipped.length) / 2).padEnd(width)).append('\n')
-        }
-        fun rule() { append("-".repeat(width)).append('\n') }
-        fun total(label: String, value: Long) {
-            val right = Money.num(value)
-            append(label.take(width - right.length - 1))
-                .append(" ".repeat((width - label.length - right.length).coerceAtLeast(1)))
-                .append(right).append('\n')
-        }
+    ): String = ReceiptRenderer.receiptText(store, sale, items, payments)
 
-        // ESC/POS image rasterization is intentionally not assumed; logo is rendered in PDF.
-        center(store.name)
-        if (store.showAddress && store.address.isNotBlank()) center(store.address)
-        if (store.showPhone && store.phone.isNotBlank()) center(store.phone)
-        rule()
-        append("Invoice: ${sale.invoiceNumber}\n")
-        append("Tanggal: ${Dates.dmyhm(sale.createdAt)}\n")
-        append("Kasir  : ${sale.userNameSnapshot}\n")
-        sale.customerNameSnapshot?.takeIf { it.isNotBlank() }?.let { append("Customer: $it\n") }
-        rule()
-        items.forEach { item ->
-            append(item.productNameSnapshot.take(width)).append('\n')
-            val left = "${item.quantity} x ${Money.num(item.unitPrice)}"
-            val right = Money.num(item.subtotal)
-            append(left).append(" ".repeat((width - left.length - right.length).coerceAtLeast(1))).append(right).append('\n')
-        }
-        rule()
-        total("Subtotal", sale.subtotal)
-        if (sale.discount > 0) total("Diskon", -sale.discount)
-        if (sale.tax > 0) total("Pajak", sale.tax)
-        if (sale.serviceCharge > 0) total("Service", sale.serviceCharge)
-        total("TOTAL", sale.grandTotal)
-        rule()
-        payments.forEach { total(methodLabel(it.method), it.amount) }
-        if (sale.changeAmount > 0) total("Kembalian", sale.changeAmount)
-        rule()
-        center(store.footer)
-    }
-
-    fun escPosBytes(store: StoreReceiptInfo, sale: SaleEntity, items: List<SaleItemEntity>, payments: List<PaymentEntity>): ByteArray {
-        val init = byteArrayOf(0x1b, 0x40)
-        val cut = byteArrayOf(0x1d, 0x56, 0x00)
-        return init + receiptText(store, sale, items, payments).toByteArray(Charsets.US_ASCII) + byteArrayOf(0x0a, 0x0a, 0x0a) + cut
-    }
+    fun escPosBytes(store: StoreReceiptInfo, sale: SaleEntity, items: List<SaleItemEntity>, payments: List<PaymentEntity>): ByteArray =
+        ReceiptRenderer.escPosBytes(store, sale, items, payments)
 
     fun createPdf(store: StoreReceiptInfo, sale: SaleEntity, items: List<SaleItemEntity>, payments: List<PaymentEntity>): File {
         val width = if (store.paperMm == 58) 384 else 576
-        val textLines = receiptText(store, sale, items, payments).lines()
+        val textLines = ReceiptRenderer.receiptText(store, sale, items, payments).lines()
         val hasLogo = store.showLogo && !store.logoPath.isNullOrBlank() && File(store.logoPath).exists()
         val logoHeight = if (hasLogo) 108 else 0
         val height = (textLines.size * 20 + 54 + logoHeight).coerceAtLeast(240)
@@ -127,12 +84,5 @@ class ReceiptService(private val context: Context) {
                 "Bagikan struk"
             )
         )
-    }
-
-    private fun methodLabel(method: String): String = when (method) {
-        "CASH" -> "Tunai"
-        "CREDIT_CARD" -> "Kartu Kredit"
-        "EWALLET" -> "E-Wallet"
-        else -> method
     }
 }

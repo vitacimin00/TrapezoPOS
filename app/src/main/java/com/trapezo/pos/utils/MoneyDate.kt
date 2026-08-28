@@ -20,7 +20,9 @@ object Money {
     /** Parse a user-typed money string ("12.500", "12500", "Rp 12,500") -> 12500 */
     fun parse(s: String): Long {
         val digits = s.filter { it.isDigit() }
-        return if (digits.isEmpty()) 0L else digits.toLong()
+        if (digits.isEmpty()) return 0L
+        // Overflow-safe: absurdly long digit strings must not throw NumberFormatException.
+        return digits.toLongOrNull() ?: Long.MAX_VALUE
     }
 
     /** Quick rounding to nearest 100 for change display */

@@ -221,18 +221,23 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
     }
     if (createProduct) ProductEditorDialog(null, categoryList, onDismiss = { createProduct = false }, onSave = { product ->
         scope.launch {
-            val r = AppGraph.products.save(product)
+            val r = AppGraph.products.save(product, userId)
             if (r.ok) { createProduct = false; message = "Produk tersimpan"; reloadPageZero() } else message = r.error
         }
     })
     showForm?.let { existing -> ProductEditorDialog(existing, categoryList, onDismiss = { showForm = null }, onSave = { product ->
         scope.launch {
-            val r = AppGraph.products.save(product)
-            if (r.ok) { showForm = null; message = "Produk diperbarui"; reloadPageZero() } else message = r.error
+            val r = AppGraph.products.save(product, userId)
+            if (r.ok) {
+                if (product.photo != existing.photo && !existing.photo.isNullOrBlank()) {
+                    PhotoStorage.deleteManaged(existing.photo)
+                }
+                showForm = null; message = "Produk diperbarui"; reloadPageZero()
+            } else message = r.error
         }
     }) }
     adjustProduct?.let { product -> StockAdjustDialog(product, userId, onDismiss = { adjustProduct = null }, onSaved = { text -> adjustProduct = null; message = text; reloadPageZero() }) }
-    if (categoriesOpen) CategoryManagerDialog(categoryList, onDismiss = { categoriesOpen = false }, onMessage = { message = it })
+    if (categoriesOpen) CategoryManagerDialog(categoryList, userId, onDismiss = { categoriesOpen = false }, onMessage = { message = it })
     importPreview?.let { preview -> ExcelPreviewDialog(preview, onDismiss = { importPreview = null }, onConfirm = { duplicate, category ->
         scope.launch {
             val r = excel.import(preview, duplicate, category, userId)
@@ -426,7 +431,7 @@ private fun StockAdjustDialog(product: ProductEntity, userId: Long, onDismiss: (
 }
 
 @Composable
-private fun CategoryManagerDialog(categories: List<CategoryEntity>, onDismiss: () -> Unit, onMessage: (String) -> Unit) {
+private fun CategoryManagerDialog(categories: List<CategoryEntity>, userId: Long, onDismiss: () -> Unit, onMessage: (String) -> Unit) {
     val scope = rememberCoroutineScope(); var name by remember { mutableStateOf("") }; var desc by remember { mutableStateOf("") }; var editingId by remember { mutableStateOf<Long?>(null) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Kategori") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Field("Nama kategori", name) { name = it }; Field("Deskripsi", desc) { desc = it }
@@ -434,7 +439,7 @@ private fun CategoryManagerDialog(categories: List<CategoryEntity>, onDismiss: (
             scope.launch {
                 val target = if (editingId != null) categories.firstOrNull { it.id == editingId }?.copy(name = name.trim(), description = desc.trim()) else CategoryEntity(name = name, description = desc)
                 if (target == null) { onMessage("Kategori tidak ditemukan"); return@launch }
-                val r = AppGraph.products.saveCategory(target)
+                val r = AppGraph.products.saveCategory(target, userId)
                 onMessage(r.error ?: if (editingId != null) "Kategori diperbarui" else "Kategori tersimpan")
                 if (r.ok) { name = ""; desc = ""; editingId = null }
             }
@@ -443,8 +448,8 @@ private fun CategoryManagerDialog(categories: List<CategoryEntity>, onDismiss: (
         HorizontalDivider(); categories.forEach { c -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text(if (c.isActive) c.name else "${c.name} (nonaktif)", color = if (c.isActive) Color.Unspecified else MaterialTheme.colorScheme.error); if (c.description.isNotBlank()) Text(c.description, style = MaterialTheme.typography.bodySmall) }
             TextButton(onClick = { editingId = c.id; name = c.name; desc = c.description }) { Text("Edit") }
-            TextButton(onClick = { scope.launch { AppGraph.products.setCategoryActive(c.id, !c.isActive); onMessage(if (c.isActive) "Kategori dinonaktifkan" else "Kategori diaktifkan") } }) { Text(if (c.isActive) "Nonaktif" else "Aktif") }
-            TextButton(onClick = { scope.launch { val r = AppGraph.products.deleteCategorySafe(c.id); onMessage(r.second) } }) { Text("Hapus") }
+            TextButton(onClick = { scope.launch { AppGraph.products.setCategoryActive(c.id, !c.isActive, userId); onMessage(if (c.isActive) "Kategori dinonaktifkan" else "Kategori diaktifkan") } }) { Text(if (c.isActive) "Nonaktif" else "Aktif") }
+            TextButton(onClick = { scope.launch { val r = AppGraph.products.deleteCategorySafe(c.id, userId); onMessage(r.second) } }) { Text("Hapus") }
         } }
     } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } })
 }
