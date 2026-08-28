@@ -82,6 +82,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.trapezo.pos.AppGraph
 import com.trapezo.pos.data.entity.CategoryEntity
 import com.trapezo.pos.data.entity.ProductEntity
+import com.trapezo.pos.domain.model.OperationalInputRules
 import com.trapezo.pos.excel.ProductExcelService
 import com.trapezo.pos.utils.Money
 import com.trapezo.pos.utils.PhotoStorage
@@ -203,14 +204,11 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
                     items(products, key = { it.id }) { product ->
                         ProductRow(product, canManage, onEdit = { showForm = product }, onAdjust = { adjustProduct = product }, onDeactivate = {
                             scope.launch {
-                                if (product.isActive) {
-                                    AppGraph.products.softDelete(product)
-                                    message = "Produk dinonaktifkan"
-                                } else {
-                                    val r = AppGraph.products.save(product.copy(isActive = true))
-                                    message = r.error ?: "Produk diaktifkan"
-                                }
-                                reloadPageZero()
+                                val result = AppGraph.products.setActive(product.id, !product.isActive, userId)
+                                if (result.ok) {
+                                    message = if (product.isActive) "Produk dinonaktifkan" else "Produk diaktifkan"
+                                    reloadPageZero()
+                                } else message = result.error
                             }
                         })
                     }
@@ -419,7 +417,12 @@ private fun StockAdjustDialog(product: ProductEntity, userId: Long, onDismiss: (
         Field(if (mode == "SET") "Stok baru" else "Jumlah", amount, numeric = true) { amount = it }
         Field("Alasan wajib", reason, single = false) { reason = it }
         if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error)
-    } }, confirmButton = { Button(onClick = { val n = Money.parse(amount); if (n <= 0 || reason.trim().isEmpty()) error = "Jumlah dan alasan wajib diisi" else scope.launch { val ok = AppGraph.products.adjustStock(product, mode, n, reason.trim(), userId); if(ok) onSaved("Adjustment stok tersimpan") else error = "Adjustment ditolak; periksa stok" } }) { Text("SIMPAN") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } })
+    } }, confirmButton = { Button(onClick = {
+        val validation = OperationalInputRules.stockAdjustment(mode, amount, reason)
+        val quantity = validation.amount
+        if (validation.error != null || quantity == null) error = validation.error
+        else scope.launch { val ok = AppGraph.products.adjustStock(product, mode, quantity, reason.trim(), userId); if(ok) onSaved("Adjustment stok tersimpan") else error = "Adjustment ditolak; periksa stok" }
+    }) { Text("SIMPAN") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } })
 }
 
 @Composable

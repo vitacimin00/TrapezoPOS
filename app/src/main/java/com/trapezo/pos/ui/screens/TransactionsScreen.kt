@@ -53,6 +53,7 @@ import com.trapezo.pos.data.entity.UserEntity
 import com.trapezo.pos.data.repository.RefundRepository
 import com.trapezo.pos.data.repository.SalesRepository
 import com.trapezo.pos.domain.model.RefundPreview
+import com.trapezo.pos.domain.model.OperationalInputRules
 import com.trapezo.pos.printer.BluetoothPrinterService
 import com.trapezo.pos.printer.ReceiptService
 import com.trapezo.pos.printer.receiptInfo
@@ -256,10 +257,11 @@ private fun RefundDialog(
         line.saleItemId to if (selected[line.saleItemId] == true) (quantities[line.saleItemId]?.toLongOrNull() ?: 0L) else 0L
     }
     val preview = RefundPreview.preview(previewState.sale.grandTotal, previewState.alreadyRefundedTotal, previewState.lines, requested)
-    val valid = reason.isNotBlank() && previewState.lines.any { line ->
-        val qty = requested[line.saleItemId] ?: 0L
-        qty in 1..line.remainingQuantity
-    } && preview.currentRefundTotal > 0L && previewState.lines.all { line -> (requested[line.saleItemId] ?: 0L) <= line.remainingQuantity }
+    val valid = reason.isNotBlank() && preview.currentRefundTotal > 0L && OperationalInputRules.validRefundSelection(
+        selected,
+        requested,
+        previewState.lines.associate { it.saleItemId to it.remainingQuantity }
+    )
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Refund ${sale.invoiceNumber}") },

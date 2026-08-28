@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.trapezo.pos.AppGraph
 import com.trapezo.pos.data.dao.MovementWithProduct
 import com.trapezo.pos.data.entity.ProductEntity
+import com.trapezo.pos.domain.model.OperationalInputRules
 import com.trapezo.pos.utils.Dates
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -196,9 +197,9 @@ private fun InventoryAdjustmentDialog(product: ProductEntity, userId: Long, onDi
         },
         confirmButton = {
             Button(onClick = {
-                val quantity = amount.toLongOrNull()
-                val invalidQuantity = quantity == null || (mode == "SET" && quantity < 0) || (mode != "SET" && quantity <= 0)
-                if (invalidQuantity || reason.trim().isEmpty()) error = if (mode == "SET") "Stok baru (nol atau lebih) dan alasan wajib diisi" else "Jumlah positif dan alasan wajib diisi"
+                val validation = OperationalInputRules.stockAdjustment(mode, amount, reason)
+                val quantity = validation.amount
+                if (validation.error != null || quantity == null) error = validation.error
                 else scope.launch {
                     if (AppGraph.products.adjustStock(product, mode, quantity, reason.trim(), userId)) onResult("Adjustment stok tersimpan")
                     else error = "Adjustment gagal; stok tidak mencukupi atau data invalid"
