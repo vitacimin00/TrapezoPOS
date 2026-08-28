@@ -16,7 +16,6 @@ import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -41,6 +40,7 @@ import com.trapezo.pos.data.entity.CashMovementEntity
 import com.trapezo.pos.data.entity.ShiftEntity
 import com.trapezo.pos.utils.Dates
 import com.trapezo.pos.utils.Money
+import java.util.Calendar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -54,6 +54,24 @@ private data class ReportState(
     val shifts: List<ShiftEntity> = emptyList(),
     val cashMovements: List<CashMovementEntity> = emptyList()
 )
+
+private suspend fun localDailyTotals(from: Long, to: Long): List<SaleDao.DailyTotalRow> {
+    if (to < from) return emptyList()
+    val rows = mutableListOf<SaleDao.DailyTotalRow>()
+    var dayStart = Dates.startOfDay(from)
+    while (dayStart <= to) {
+        val nextStart = Calendar.getInstance().apply {
+            timeInMillis = dayStart
+            add(Calendar.DAY_OF_YEAR, 1)
+        }.timeInMillis
+        val rangeStart = maxOf(dayStart, from)
+        val rangeEnd = minOf(nextStart - 1, to)
+        val total = AppGraph.sales.rangeTotals(rangeStart, rangeEnd)
+        rows += SaleDao.DailyTotalRow(dayStart = dayStart, total = total.total, cnt = total.cnt)
+        dayStart = nextStart
+    }
+    return rows
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,7 +98,7 @@ fun ReportsScreen() {
                 methods = AppGraph.sales.methodBreakdown(from, to),
                 topProducts = AppGraph.sales.topProducts(from, to),
                 cashiers = AppGraph.sales.cashierPerformance(from, to),
-                daily = AppGraph.db.saleDao().dailyTotals(from, to, Dates.DAY_MS),
+                daily = localDailyTotals(from, to),
                 shifts = AppGraph.db.shiftDao().allShifts(50, 0),
                 cashMovements = AppGraph.db.shiftDao().allCashMovements(50, 0)
             )
@@ -104,15 +122,30 @@ fun ReportsScreen() {
                 }
             }
             item { Text("Laporan penjualan", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-            item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { ReportMetric("Penjualan", Money.fmt(state.total.total), Modifier.weight(1f)); ReportMetric("Transaksi", state.total.cnt.toString(), Modifier.weight(1f)); ReportMetric("Item", state.items.toString(), Modifier.weight(1f)) } }
             item {
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) {
-                    Text("Tren penjualan", fontWeight = FontWeight.SemiBold)
-                    if (state.daily.isEmpty()) Text("Belum ada transaksi pada periode ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    else state.daily.forEach { day ->
-                        Row(Modifier.fillMaxWidth()) { Text(Dates.dmy(day.dayStart), Modifier.weight(1f)); Text("${day.cnt} transaksi", Modifier.width(100.dp)); Text(Money.fmt(day.total ?: 0)) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ReportMetric("Penjualan", Money.fmt(state.total.total), Modifier.weight(1f))
+                    ReportMetric("Transaksi", state.total.cnt.toString(), Modifier.weight(1f))
+                    ReportMetric("Item", state.items.toString(), Modifier.weight(1f))
+                }
+            }
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("Tren penjualan", fontWeight = FontWeight.SemiBold)
+                        if (state.daily.isEmpty()) {
+                            Text("Belum ada transaksi pada periode ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            state.daily.forEach { day ->
+                                Row(Modifier.fillMaxWidth()) {
+                                    Text(Dates.dmy(day.dayStart), Modifier.weight(1f))
+                                    Text("${day.cnt} transaksi", Modifier.width(100.dp))
+                                    Text(Money.fmt(day.total ?: 0))
+                                }
+                            }
+                        }
                     }
-                } }
+                }
             }
             item { SectionTitle("Laporan pembayaran") }
             if (state.methods.isEmpty()) item { EmptyReport("Belum ada pembayaran pada periode ini.") }
@@ -126,12 +159,19 @@ fun ReportsScreen() {
             item { SectionTitle("Shift kasir") }
             if (state.shifts.isEmpty()) item { EmptyReport("Belum ada shift tercatat.") }
             else items(state.shifts, key = { it.id }) { shift ->
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Row(Modifier.fillMaxWidth()) { Text(shift.userNameSnapshot.ifBlank { "Kasir #${shift.userId}" }, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)); Text(shift.status, color = if (shift.status == "OPEN") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold) }
-                    Text("${Dates.dmyhm(shift.openedAt)} • Modal ${Money.fmt(shift.openingCash)}", style = MaterialTheme.typography.bodySmall)
-                    Text("Tunai ${Money.fmt(shift.totalCashSales)} • Non-tunai ${Money.fmt(shift.totalNonCashSales)} • Kas seharusnya ${Money.fmt(shift.expectedCash)}", style = MaterialTheme.typography.bodySmall)
-                    if (shift.status == "CLOSED") Text("Kas aktual ${Money.fmt(shift.actualCash)} • Selisih ${Money.fmt(shift.difference)}", style = MaterialTheme.typography.bodySmall, color = if (shift.difference == 0L) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
-                } }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(Modifier.fillMaxWidth()) {
+                            Text(shift.userNameSnapshot.ifBlank { "Kasir #${shift.userId}" }, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            Text(shift.status, color = if (shift.status == "OPEN") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+                        }
+                        Text("${Dates.dmyhm(shift.openedAt)} • Modal ${Money.fmt(shift.openingCash)}", style = MaterialTheme.typography.bodySmall)
+                        Text("Tunai ${Money.fmt(shift.totalCashSales)} • Non-tunai ${Money.fmt(shift.totalNonCashSales)} • Kas seharusnya ${Money.fmt(shift.expectedCash)}", style = MaterialTheme.typography.bodySmall)
+                        if (shift.status == "CLOSED") {
+                            Text("Kas aktual ${Money.fmt(shift.actualCash)} • Selisih ${Money.fmt(shift.difference)}", style = MaterialTheme.typography.bodySmall, color = if (shift.difference == 0L) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
             }
             item { SectionTitle("Cash in / Cash out") }
             if (state.cashMovements.isEmpty()) item { EmptyReport("Belum ada cash in/out tercatat.") }
@@ -149,32 +189,72 @@ fun ReportsScreen() {
         }
     }
     if (pickFrom) {
-        val state = rememberDatePickerState(initialSelectedDateMillis = fromMs)
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = fromMs)
         DatePickerDialog(
             onDismissRequest = { pickFrom = false },
-            confirmButton = { TextButton(onClick = { fromMs = state.selectedDateMillis?.let { Dates.startOfDay(it) }; pickFrom = false }) { Text("OK") } },
+            confirmButton = { TextButton(onClick = { fromMs = pickerState.selectedDateMillis?.let { Dates.startOfDay(it) }; pickFrom = false }) { Text("OK") } },
             dismissButton = { TextButton(onClick = { pickFrom = false }) { Text("BATAL") } }
-        ) { DatePicker(state = state) }
+        ) { DatePicker(state = pickerState) }
     }
     if (pickTo) {
-        val state = rememberDatePickerState(initialSelectedDateMillis = toMs)
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = toMs)
         DatePickerDialog(
             onDismissRequest = { pickTo = false },
-            confirmButton = { TextButton(onClick = { toMs = state.selectedDateMillis?.let { Dates.endOfDay(it) }; pickTo = false }) { Text("OK") } },
+            confirmButton = { TextButton(onClick = { toMs = pickerState.selectedDateMillis?.let { Dates.endOfDay(it) }; pickTo = false }) { Text("OK") } },
             dismissButton = { TextButton(onClick = { pickTo = false }) { Text("BATAL") } }
-        ) { DatePicker(state = state) }
+        ) { DatePicker(state = pickerState) }
     }
 }
 
-@Composable private fun ReportMetric(label: String, value: String, modifier: Modifier) = Card(modifier) { Column(Modifier.padding(10.dp)) { Text(label, style = MaterialTheme.typography.labelSmall); Text(value, fontWeight = FontWeight.Bold) } }
-@Composable private fun SectionTitle(value: String) = Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-@Composable private fun EmptyReport(value: String) = Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
-@Composable private fun ReportLine(title: String, subtitle: String, amount: Long) = Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle, style = MaterialTheme.typography.bodySmall) }; Text(Money.fmt(amount), color = MaterialTheme.colorScheme.primary) } }
-
-@Composable private fun StockReport() {
-    var low by remember { mutableStateOf(0) }; var out by remember { mutableStateOf(0) }
-    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { low = AppGraph.products.lowStock().size; out = AppGraph.products.outOfStock().size } }
-    Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) { Text("Stok rendah: $low"); Text("Stok habis: $out") } }
+@Composable
+private fun ReportMetric(label: String, value: String, modifier: Modifier) = Card(modifier) {
+    Column(Modifier.padding(10.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall)
+        Text(value, fontWeight = FontWeight.Bold)
+    }
 }
 
-private fun methodLabel(method: String) = when (method) { "CASH" -> "Tunai"; "QRIS" -> "QRIS"; "TRANSFER" -> "Transfer"; "DEBIT" -> "Debit"; "CREDIT_CARD" -> "Kartu Kredit"; "EWALLET" -> "E-Wallet"; else -> method }
+@Composable
+private fun SectionTitle(value: String) = Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+@Composable
+private fun EmptyReport(value: String) = Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
+
+@Composable
+private fun ReportLine(title: String, subtitle: String, amount: Long) = Card(Modifier.fillMaxWidth()) {
+    Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall)
+        }
+        Text(Money.fmt(amount), color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+private fun StockReport() {
+    var low by remember { mutableStateOf(0) }
+    var out by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            low = AppGraph.products.lowStock().size
+            out = AppGraph.products.outOfStock().size
+        }
+    }
+    Card(Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            Text("Stok rendah: $low")
+            Text("Stok habis: $out")
+        }
+    }
+}
+
+private fun methodLabel(method: String) = when (method) {
+    "CASH" -> "Tunai"
+    "QRIS" -> "QRIS"
+    "TRANSFER" -> "Transfer"
+    "DEBIT" -> "Debit"
+    "CREDIT_CARD" -> "Kartu Kredit"
+    "EWALLET" -> "E-Wallet"
+    else -> method
+}
