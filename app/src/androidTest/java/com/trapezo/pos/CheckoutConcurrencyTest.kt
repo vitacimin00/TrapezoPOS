@@ -24,17 +24,20 @@ class CheckoutConcurrencyTest {
     private lateinit var db: com.trapezo.pos.data.database.AppDatabase
     private lateinit var admin: com.trapezo.pos.data.entity.UserEntity
 
-    @Before fun setUp() = runBlocking {
+    @Before fun setUp() {
+        runBlocking {
         db = TestDb.inMemory()
         admin = db.userDao().insert(TestDb.admin(active = true)).let { TestDb.admin(active = true).copy(id = it) }
         db.paymentMethodDao().insert(com.trapezo.pos.data.entity.PaymentMethodEntity(name = "Tunai", type = "CASH", isActive = true))
+    }
     }
 
     @After fun tearDown() { db.close() }
 
     private suspend fun openShift() = TestDb.shifts(db).open(admin, 100_000L).let { (it as com.trapezo.pos.data.repository.ShiftRepository.Result.Ok).shift }
 
-    @Test fun concurrentCheckout_onlyOneSucceedsForLastStock() = runBlocking {
+    @Test fun concurrentCheckout_onlyOneSucceedsForLastStock() {
+        runBlocking {
         val products = TestDb.products(db)
         val saved = products.save(ProductEntity(name = "Item", sku = "CC-1", trackInventory = true, stockQty = 1, sellPrice = 10_000), userId = admin.id)
         val shift = openShift()
@@ -53,8 +56,10 @@ class CheckoutConcurrencyTest {
         assertEquals(0L, db.productDao().stockOf(saved.id))
         assertEquals(1, db.saleDao().itemsFor(1).size)
     }
+    }
 
-    @Test fun concurrentCheckout_invoicesAreUnique() = runBlocking {
+    @Test fun concurrentCheckout_invoicesAreUnique() {
+        runBlocking {
         val products = TestDb.products(db)
         val saved = products.save(ProductEntity(name = "Item", sku = "CC-2", trackInventory = true, stockQty = 100, sellPrice = 5_000), userId = admin.id)
         val shift = openShift()
@@ -70,5 +75,6 @@ class CheckoutConcurrencyTest {
         val invoices = results.filterIsInstance<SalesRepository.CheckoutResult.Success>().map { it.invoice }
         assertEquals(invoices.size, invoices.toSet().size) // all unique
         assertTrue(invoices.isNotEmpty())
+    }
     }
 }

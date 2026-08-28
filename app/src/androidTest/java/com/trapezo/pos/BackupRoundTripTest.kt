@@ -32,7 +32,8 @@ class BackupRoundTripTest {
 
     private fun copyBytes(from: File, to: File) = from.inputStream().use { i -> to.outputStream().use { o -> i.copyTo(o) } }
 
-    @Test fun backupFile_carriesMarkerAndPassesIntegrity() = runBlocking {
+    @Test fun backupFile_carriesMarkerAndPassesIntegrity() {
+        runBlocking {
         // 1. create real Trapezo DB with representative data.
         val db = AppDatabase.get()
         db.userDao().insert(TestDb.admin(active = true))
@@ -59,6 +60,7 @@ class BackupRoundTripTest {
         assertEquals(5, userVersion)                    // Room schema version untouched
         assertEquals("ok", integrity)                   // not corrupt
         backupFile.delete()
+    }
     }
 
     @Test fun restoreValidation_acceptsMarkedBackup() {

@@ -23,6 +23,7 @@ object XlsxModule {
     object Limits {
         const val MAX_ENTRIES = 1024
         const val MAX_COMPRESSED_ENTRY_BYTES = 32L * 1024 * 1024
+        const val MAX_TOTAL_COMPRESSED_BYTES = 128L * 1024 * 1024
         const val MAX_TOTAL_EXPANDED_BYTES = 96L * 1024 * 1024
         const val MAX_ROWS = 100_000
         const val MAX_COLUMNS = 256
@@ -118,11 +119,14 @@ object XlsxModule {
         var totalExpanded = 0L
         ZipInputStream(stream.buffered()).use { zin ->
             var e: ZipEntry? = zin.nextEntry
+            var compressedRead = 0L
             while (e != null) {
                 if (!e.isDirectory) {
                     entryCount++
                     if (entryCount > Limits.MAX_ENTRIES) throw IllegalArgumentException("File Excel terlalu banyak entri")
                     if (e.size > Limits.MAX_COMPRESSED_ENTRY_BYTES) throw IllegalArgumentException("File Excel mengandung entri terlalu besar")
+                    compressedRead += e.compressedSize.takeIf { it >= 0 } ?: 0
+                    if (compressedRead > Limits.MAX_TOTAL_COMPRESSED_BYTES) throw IllegalArgumentException("File Excel terlalu besar (terkompresi)")
                     val name = e.name.replace('\\', '/')
                     if (!name.startsWith("xl/media/") && !name.startsWith("xl/drawings/")) {
                         val bytes = readBounded(zin)
