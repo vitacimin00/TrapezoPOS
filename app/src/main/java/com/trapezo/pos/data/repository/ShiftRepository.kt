@@ -17,6 +17,7 @@ class ShiftRepository(private val db: AppDatabase) {
 
     suspend fun open(user: UserEntity, openingCash: Long): Result = withContext(Dispatchers.IO) {
         if (openingCash < 0) return@withContext Result.Error("Modal awal tidak boleh negatif")
+        if (openingCash > com.trapezo.pos.utils.Money.MAX_RUPIAH) return@withContext Result.Error("Modal awal melebihi batas nilai operasional")
         try {
             var opened: ShiftEntity? = null
             db.withTransaction {
@@ -58,6 +59,7 @@ class ShiftRepository(private val db: AppDatabase) {
     suspend fun cash(shift: ShiftEntity, type: String, amount: Long, note: String, userId: Long): Result =
         withContext(Dispatchers.IO) {
             if (amount <= 0) return@withContext Result.Error("Nominal harus lebih besar dari 0")
+            if (amount > com.trapezo.pos.utils.Money.MAX_RUPIAH) return@withContext Result.Error("Nominal melebihi batas nilai operasional")
             if (type !in setOf("CASH_IN", "CASH_OUT")) return@withContext Result.Error("Tipe cash movement tidak valid")
             try {
                 var updated: ShiftEntity? = null
@@ -66,6 +68,18 @@ class ShiftRepository(private val db: AppDatabase) {
                         ?: throw IllegalArgumentException("Shift tidak ditemukan")
                     if (current.status != "OPEN" || current.userId != userId) {
                         throw IllegalArgumentException("Shift ini tidak aktif atau bukan milik kasir")
+                    }
+                    // Checked arithmetic: prevent Long wraparound on the running cash balance.
+                    if (type == "CASH_IN") {
+                        com.trapezo.pos.utils.Money.addExact(current.expectedCash, amount)
+                            ?: throw IllegalArgumentException("Nominal melampaui batas kas yang dapat diproses")
+                        com.trapezo.pos.utils.Money.addExact(current.cashIn, amount)
+                            ?: throw IllegalArgumentException("Nominal melampaui batas kas yang dapat diproses")
+                    } else {
+                        com.trapezo.pos.utils.Money.addExact(current.cashOut, amount)
+                            ?: throw IllegalArgumentException("Nominal melampaui batas kas yang dapat diproses")
+                        com.trapezo.pos.utils.Money.subtractExact(current.expectedCash, amount)
+                            ?: throw IllegalArgumentException("Nominal melampaui batas kas yang dapat diproses")
                     }
                     val affected = if (type == "CASH_IN") {
                         db.shiftDao().addCashIn(current.id, userId, amount)
@@ -109,6 +123,7 @@ class ShiftRepository(private val db: AppDatabase) {
 
     suspend fun close(shift: ShiftEntity, actualCash: Long, userId: Long): Result = withContext(Dispatchers.IO) {
         if (actualCash < 0) return@withContext Result.Error("Kas aktual tidak boleh negatif")
+        if (actualCash > com.trapezo.pos.utils.Money.MAX_RUPIAH) return@withContext Result.Error("Kas aktual melebihi batas nilai operasional")
         try {
             var closed: ShiftEntity? = null
             db.withTransaction {
@@ -119,7 +134,8 @@ class ShiftRepository(private val db: AppDatabase) {
                 }
                 // expectedCash is the authoritative running balance maintained by sale/refund/cash writes.
                 val expected = latest.expectedCash
-                val difference = actualCash - expected
+                val difference = com.trapezo.pos.utils.Money.subtractExact(actualCash, expected)
+                    ?: throw IllegalArgumentException("Selisih kas melampaui batas nilai yang dapat diproses")
                 val now = System.currentTimeMillis()
                 if (db.shiftDao().closeShift(
                         id = latest.id,

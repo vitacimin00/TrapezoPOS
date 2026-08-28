@@ -230,6 +230,9 @@ data class MovementWithProduct(
 
 @Dao
 interface PaymentMethodDao {
+    @Insert
+    suspend fun insert(m: com.trapezo.pos.data.entity.PaymentMethodEntity): Long
+
     @Query("SELECT * FROM payment_methods ORDER BY id ASC")
     suspend fun all(): List<com.trapezo.pos.data.entity.PaymentMethodEntity>
 

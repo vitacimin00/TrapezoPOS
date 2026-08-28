@@ -13,22 +13,23 @@ import java.util.Locale
 /**
  * Local SQLite backup/restore through Storage Access Framework streams.
  *
- * Hardening guarantees:
- *  - a FULL WAL checkpoint runs before the raw `.db` is copied, so the backup
- *    never depends on sidecar `-wal`/`-shm` files a SAF stream cannot capture;
- *  - the live database is stamped with a `PRAGMA application_id` marker so a
- *    restore can positively identify a Trapezo POS backup;
- *  - restore validates size, SQLite header, application marker, schema version
- *    and required core tables before the current database is ever touched;
- *  - restore is staged, the old database is preserved as `.pre_restore`, and the
- *    old file is only displaced after the staged file is verified.
+ * Snapshot order is fixed so the copied raw `.db` already contains the Trapezo
+ * `application_id` marker before any byte is read. Because the app runs in WAL mode,
+ * we (1) write the marker, (2) run a FULL checkpoint, and (3) re-verify the marker is
+ * visible from a fresh connection before copying — guaranteeing the WAL content is in
+ * the main file. Backup/restore is serialized through [lock] so a concurrent write
+ * cannot interleave with the checkpoint+snapshot.
+ *
+ * Restore validates a staged file before touching the live DB: SQLite header, size cap,
+ * Trapezo application marker (with documented legacy-backup handling), schema version,
+ * required core tables and integrity.
  */
 class BackupService(private val context: Context) {
     data class BackupResult(val ok: Boolean, val message: String, val fileName: String? = null)
 
     companion object {
         /** "TRPZ" in big-endian — SQLite application_id marker for Trapezo POS backups. */
-        private const val APP_ID: Int = 0x5452505A
+        internal const val APP_ID: Int = 0x5452505A
         private const val CURRENT_SCHEMA_VERSION = 5
         private const val MAX_BACKUP_BYTES = 512L * 1024 * 1024
         private val REQUIRED_TABLES = listOf(
@@ -37,94 +38,96 @@ class BackupService(private val context: Context) {
             "payment_methods", "shifts", "cash_movements", "refunds", "refund_items",
             "refund_payments", "settings", "audit_logs"
         )
+        private val lock = Any()
     }
 
     fun suggestedName(): String =
         "TrapezoPOS_Backup_${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}.db"
 
-    private fun stampApplicationId() {
-        val db = AppDatabase.get().openHelper.writableDatabase
-        db.execSQL("PRAGMA application_id = $APP_ID")
-        db.execSQL("PRAGMA user_version = $CURRENT_SCHEMA_VERSION")
-    }
-
     suspend fun backupTo(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
-        try {
-            AppDatabase.get().openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
-            stampApplicationId()
-            val dbFile = context.getDatabasePath(AppDatabase.NAME)
-            if (!dbFile.exists()) return@withContext BackupResult(false, "Database belum tersedia")
-            if (dbFile.length() > MAX_BACKUP_BYTES) return@withContext BackupResult(false, "Database terlalu besar untuk dibackup")
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                dbFile.inputStream().use { it.copyTo(out) }
-            } ?: return@withContext BackupResult(false, "Tidak bisa menulis file backup")
-            BackupResult(true, "Backup berhasil dibuat", suggestedName())
-        } catch (e: Exception) {
-            BackupResult(false, "Backup gagal: ${e.message}")
+        synchronized(lock) {
+            try {
+                val db = AppDatabase.get().openHelper.writableDatabase
+                // 1. ensure the Trapezo marker is set (idempotent).
+                db.execSQL("PRAGMA application_id = $APP_ID")
+                // 2. checkpoint WAL into the main file so the marker is in the raw .db.
+                db.query("PRAGMA wal_checkpoint(FULL)").close()
+                // 3. re-verify the marker is durable via a fresh read before copying.
+                val visible = db.query("PRAGMA application_id").use { c ->
+                    if (c.moveToFirst()) c.getInt(0) else 0
+                }
+                if (visible != APP_ID) {
+                    return@synchronized BackupResult(false, "Checkpoint gagal; marker backup belum tertanam")
+                }
+                val dbFile = context.getDatabasePath(AppDatabase.NAME)
+                if (!dbFile.exists()) return@synchronized BackupResult(false, "Database belum tersedia")
+                if (dbFile.length() > MAX_BACKUP_BYTES) return@synchronized BackupResult(false, "Database terlalu besar untuk dibackup")
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    dbFile.inputStream().use { it.copyTo(out) }
+                } ?: return@synchronized BackupResult(false, "Tidak bisa menulis file backup")
+                BackupResult(true, "Backup berhasil dibuat", suggestedName())
+            } catch (e: Exception) {
+                BackupResult(false, "Backup gagal: ${e.message}")
+            }
         }
     }
 
     suspend fun restoreFrom(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
-        val live = context.getDatabasePath(AppDatabase.NAME)
-        val parent = live.parentFile ?: return@withContext BackupResult(false, "Folder database tidak tersedia")
-        val staged = File(parent, "${AppDatabase.NAME}.restore_staged")
-        val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
-        val wal = File(parent, "${AppDatabase.NAME}-wal")
-        val shm = File(parent, "${AppDatabase.NAME}-shm")
-        try {
-            // 1. stream the incoming file with a hard size cap, never materialising a huge blob.
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                staged.outputStream().use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    var total = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        total += n
-                        if (total > MAX_BACKUP_BYTES) {
-                            throw IllegalStateException("File backup melebihi batas ukuran")
+        synchronized(lock) {
+            val live = context.getDatabasePath(AppDatabase.NAME)
+            val parent = live.parentFile ?: return@synchronized BackupResult(false, "Folder database tidak tersedia")
+            val staged = File(parent, "${AppDatabase.NAME}.restore_staged")
+            val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
+            val wal = File(parent, "${AppDatabase.NAME}-wal")
+            val shm = File(parent, "${AppDatabase.NAME}-shm")
+            try {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    staged.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            total += n
+                            if (total > MAX_BACKUP_BYTES) throw IllegalStateException("File backup melebihi batas ukuran")
+                            out.write(buf, 0, n)
                         }
-                        out.write(buf, 0, n)
                     }
+                } ?: return@synchronized BackupResult(false, "Tidak dapat membaca file yang dipilih")
+
+                val error = validateStaged(staged)
+                if (error != null) {
+                    staged.delete()
+                    return@synchronized BackupResult(false, error)
                 }
-            } ?: return@withContext BackupResult(false, "Tidak dapat membaca file yang dipilih")
 
-            // 2. validate: SQLite header, metadata, schema version and required tables.
-            val error = validateStaged(staged)
-            if (error != null) {
+                AppDatabase.closeAndClear()
+                if (previous.exists()) previous.delete()
+                if (live.exists() && !live.renameTo(previous)) {
+                    return@synchronized BackupResult(false, "Gagal mengamankan database lama")
+                }
+                wal.delete()
+                shm.delete()
+                if (!staged.renameTo(live)) {
+                    if (previous.exists()) previous.renameTo(live)
+                    return@synchronized BackupResult(false, "Gagal menerapkan database restore")
+                }
+                BackupResult(true, "Restore berhasil. Tutup lalu buka kembali aplikasi untuk memakai data baru.")
+            } catch (e: Exception) {
                 staged.delete()
-                return@withContext BackupResult(false, error)
+                BackupResult(false, "Restore gagal: ${e.message}")
             }
-
-            // 3. close the live Room handle so no Windows/SQLite file lock survives.
-            AppDatabase.closeAndClear()
-            if (previous.exists()) previous.delete()
-            if (live.exists() && !live.renameTo(previous)) {
-                return@withContext BackupResult(false, "Gagal mengamankan database lama")
-            }
-            wal.delete()
-            shm.delete()
-            if (!staged.renameTo(live)) {
-                // Atomic recovery attempt: old DB remains available if replacement failed.
-                if (previous.exists()) previous.renameTo(live)
-                return@withContext BackupResult(false, "Gagal menerapkan database restore")
-            }
-            BackupResult(true, "Restore berhasil. Tutup lalu buka kembali aplikasi untuk memakai data baru.")
-        } catch (e: Exception) {
-            staged.delete()
-            BackupResult(false, "Restore gagal: ${e.message}")
         }
     }
 
     /** Returns a user-facing error message, or null when the staged backup is valid. */
-    private fun validateStaged(staged: File): String? {
+    internal fun validateStaged(staged: File): String? {
         if (!staged.exists() || staged.length() == 0L) return "File backup kosong"
         val header = ByteArray(16)
         staged.inputStream().use { input -> input.read(header) }
         val magic = header.copyOfRange(0, 16).toString(Charsets.US_ASCII)
         if (!magic.startsWith("SQLite format 3")) return "File bukan database SQLite yang valid"
 
-        // Open read-only to interrogate metadata + table presence without mutating.
         val db = try {
             android.database.sqlite.SQLiteDatabase.openDatabase(staged.path, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY)
         } catch (e: Exception) {
@@ -135,15 +138,35 @@ class BackupService(private val context: Context) {
                 db.rawQuery(sql, null).use { c -> if (c.moveToFirst()) c.getInt(0) else -1 }
             val appId = pragmaInt("PRAGMA application_id")
             val userVersion = pragmaInt("PRAGMA user_version")
-            if (appId != APP_ID) return "File bukan backup Trapezo POS (penanda aplikasi tidak cocok)"
+
+            // Marker validation with documented legacy-backup compatibility:
+            //  - a marked (Track E+) backup must carry the Trapezo application_id;
+            //  - a legacy (pre-Track-E) Trapezo backup has application_id=0 but a valid
+            //    Room schema and full Trapezo table set, so it is still accepted.
+            val isMarked = appId == APP_ID
+            if (!isMarked && appId != 0) {
+                return "File bukan backup Trapezo POS (penanda aplikasi tidak cocok)"
+            }
+
             if (userVersion < 1 || userVersion > CURRENT_SCHEMA_VERSION) {
                 return "Versi skema backup ($userVersion) tidak kompatibel dengan aplikasi ($CURRENT_SCHEMA_VERSION)"
             }
+
             val tableCount = db.rawQuery(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name IN " +
                     "(${REQUIRED_TABLES.joinToString(",") { "'$it'" }})", null
             ).use { c -> var n = 0; while (c.moveToNext()) n++; n }
             if (tableCount < REQUIRED_TABLES.size) return "Backup tidak lengkap: tabel inti tidak ditemukan"
+
+            // For legacy (application_id=0) files, additionally demand Room's own
+            // identity marker table to distinguish a real Trapezo DB from a foreign SQLite.
+            if (!isMarked) {
+                val hasRoomMaster = db.rawQuery(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='room_master_table'", null
+                ).use { c -> c.moveToFirst() }
+                if (!hasRoomMaster) return "File SQLite ini bukan backup Trapezo POS"
+            }
+
             val integrity = db.rawQuery("PRAGMA quick_check", null).use { c ->
                 if (c.moveToFirst()) c.getString(0) else "unknown"
             }

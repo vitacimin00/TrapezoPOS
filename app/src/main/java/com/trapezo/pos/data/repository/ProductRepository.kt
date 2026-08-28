@@ -101,13 +101,7 @@ class ProductRepository(
 
                 if (entity.id == 0L) {
                     if (entity.sku.isBlank()) {
-                        var candidate: String
-                        do {
-                            val seq = settings.long("sku.seq", 1)
-                            candidate = String.format("TRP-%06d", seq)
-                            settings.putLong("sku.seq", seq + 1)
-                        } while (productDao.skuTaken(candidate, 0) > 0)
-                        entity = entity.copy(sku = candidate)
+                        entity = entity.copy(sku = settings.reserveNextSkuCode())
                     }
                     val initial = initialQtyOverride ?: entity.stockQty
                     if (initial < 0) throw Validation("Stok awal tidak boleh negatif")

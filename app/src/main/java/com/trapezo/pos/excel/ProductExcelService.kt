@@ -51,9 +51,16 @@ class ProductExcelService(private val db: AppDatabase) {
             val v = HEADERS.associateWith { header -> raw.entries.firstOrNull { it.key.trim().equals(header, true) }?.value?.trim().orEmpty() }
             val errors = mutableListOf<String>()
             if (v["name"].isNullOrBlank()) errors += "Nama wajib diisi"
-            listOf("buy_price", "market_price", "sell_price", "pos_sell_price", "stock_qty", "low_stock_alert", "weight_kg").forEach { key ->
+            // Formula cells are computed results, not trusted static import data.
+            if (book.formulaRows.contains(index)) errors += "Baris mengandung formula Excel yang tidak didukung"
+            // Strict integer validation: money and stock are integer Rupiah/quantity only.
+            listOf("buy_price", "market_price", "sell_price", "pos_sell_price", "comission", "customer_comission", "uom_buy_price", "uom_sell_price", "uom_sell_price_pos").forEach { key ->
                 val s = v[key].orEmpty()
-                if (s.isNotBlank() && parseNumber(s) == null) errors += "$key harus berupa angka"
+                if (s.isNotBlank() && strictInteger(s, MAX_RUPIAH) == null) errors += "$key harus berupa bilangan bulat Rupiah dalam rentang aman"
+            }
+            listOf("stock_qty", "low_stock_alert", "qty_fast_moving", "loyalty_points").forEach { key ->
+                val s = v[key].orEmpty()
+                if (s.isNotBlank() && strictInteger(s, MAX_QTY) == null) errors += "$key harus berupa bilangan bulat dalam rentang aman"
             }
             val barcode = v["barcode"].orEmpty()
             val sku = v["sku"].orEmpty()
@@ -154,18 +161,25 @@ class ProductExcelService(private val db: AppDatabase) {
                     }
                     updated++
                 } else {
-                    val prepared = base.copy(sku = base.sku.ifBlank { nextSku() })
-                    if (prepared.barcode.isNotBlank() && products.barcodeTaken(prepared.barcode, 0) > 0) {
-                        throw IllegalArgumentException("Barcode sudah dipakai produk lain")
-                    }
-                    if (prepared.sku.isNotBlank() && products.skuTaken(prepared.sku, 0) > 0) {
-                        throw IllegalArgumentException("SKU sudah dipakai produk lain")
-                    }
-                    val newId = products.insert(prepared)
-                    if (prepared.trackInventory && prepared.stockQty != 0L) {
-                        db.inventoryDao().insert(
-                            InventoryMovementEntity(productId = newId, type = "IMPORT", quantity = prepared.stockQty, note = "Import Excel", userId = userId)
-                        )
+                    // New-product import is indivisible: insert + initial stock + movement
+                    // + SKU reservation commit together, satisfying the Track C invariant.
+                    db.withTransaction {
+                        // Revalidate the actor inside the write transaction (actor may have
+                        // been deactivated mid-import; do not let stale rows keep writing).
+                        com.trapezo.pos.data.repository.Authorization.requireActiveAdmin(db, userId)
+                        val prepared = base.copy(sku = base.sku.ifBlank { nextSku() })
+                        if (prepared.barcode.isNotBlank() && products.barcodeTaken(prepared.barcode, 0) > 0) {
+                            throw IllegalArgumentException("Barcode sudah dipakai produk lain")
+                        }
+                        if (prepared.sku.isNotBlank() && products.skuTaken(prepared.sku, 0) > 0) {
+                            throw IllegalArgumentException("SKU sudah dipakai produk lain")
+                        }
+                        val newId = products.insert(prepared)
+                        if (prepared.trackInventory && prepared.stockQty != 0L) {
+                            db.inventoryDao().insert(
+                                InventoryMovementEntity(productId = newId, type = "IMPORT", quantity = prepared.stockQty, note = "Import Excel", userId = userId)
+                            )
+                        }
                     }
                     imported++
                 }
@@ -196,24 +210,39 @@ class ProductExcelService(private val db: AppDatabase) {
 
     private suspend fun categoryName(id: Long?): String = id?.let { db.categoryDao().byId(it)?.name }.orEmpty()
     private suspend fun nextSku(): String {
-        var sequence = db.settingsDao().get("sku.seq")?.toLongOrNull() ?: 1L
-        var candidate: String
-        do {
-            candidate = "TRP-%06d".format(sequence++)
-        } while (db.productDao().skuTaken(candidate, 0) > 0)
-        db.settingsDao().put(SettingEntity(key = "sku.seq", value = sequence.toString()))
-        return candidate
+        // Delegates to the canonical allocator; caller is inside a transaction.
+        return com.trapezo.pos.data.repository.SettingsRepository(db).reserveNextSkuCode()
     }
     private fun parseNumber(v: String): Double? = ExcelNumberParser.parse(v)
-    private fun money(v: String?): Long = safeLong(parseNumber(v.orEmpty()), 0L, MAX_RUPIAH)
-    private fun qty(v: String?, def: Long = 0): Long = safeLong(parseNumber(v.orEmpty()), def, MAX_QTY)
+    /** Integer-only money parse: rejects fractional, overflow, negative, out-of-range. */
+    private fun money(v: String?): Long = strictInteger(v.orEmpty(), MAX_RUPIAH) ?: 0L
+    /** Integer-only quantity parse. */
+    private fun qty(v: String?, def: Long = 0): Long = strictInteger(v.orEmpty(), MAX_QTY) ?: def
     private fun number(v: String?, def: Double): Double {
         val d = parseNumber(v.orEmpty()) ?: return def
         return if (d.isFinite() && d in -MAX_WEIGHT..MAX_WEIGHT) d else def
     }
-    private fun safeLong(d: Double?, def: Long, cap: Long): Long {
-        if (d == null || !d.isFinite() || d < 0 || d > cap.toDouble()) return def
-        return d.toLong()
+    /**
+     * Strict integer parse for Rupiah/stock cells. Rejects fractional values (10.9),
+     * negative where prohibited, Long overflow, and values beyond the operational ceiling.
+     * Preview validation uses the same rule so an out-of-range value never becomes 0 later.
+     */
+    private fun strictInteger(raw: String, cap: Long): Long? {
+        val clean = raw.trim()
+        if (clean.isEmpty()) return null
+        val digits = clean.filter { it.isDigit() }
+        if (digits.isEmpty()) return null
+        // Reject any sign of fractional input or non-integer formatting.
+        if (clean.contains('.') || clean.contains(',')) {
+            // allow thousand separators only when purely between digits, but never a decimal point
+            if (clean.contains('.')) return null
+            // commas as thousand separators are tolerated if every remaining char is digit/comma
+            if (clean.any { !it.isDigit() && it != ',' }) return null
+        }
+        if (digits.length > 18) return null
+        val value = digits.toLongOrNull() ?: return null
+        if (value < 0 || value > cap) return null
+        return value
     }
     private fun bool(v: String?, def: Boolean = false): Boolean = when (v?.trim()?.lowercase()) { "1", "true", "yes", "ya", "y" -> true; "0", "false", "no", "tidak", "n" -> false; else -> def }
 }

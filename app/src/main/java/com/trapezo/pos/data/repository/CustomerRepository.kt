@@ -43,9 +43,7 @@ class CustomerRepository(
                     balance = existing?.balance ?: 0
                 )
                 if (value.code.isBlank()) {
-                    val seq = settings.long("customer.seq", 1)
-                    value = value.copy(code = "CUS-%06d".format(seq))
-                    settings.putLong("customer.seq", seq + 1)
+                    value = value.copy(code = settings.reserveNextCustomerCode())
                 }
                 val same = dao.byCode(value.code)
                 if (same != null && same.id != value.id) {

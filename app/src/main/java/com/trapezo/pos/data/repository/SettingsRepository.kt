@@ -1,20 +1,23 @@
 package com.trapezo.pos.data.repository
 
+import androidx.room.withTransaction
 import com.trapezo.pos.data.database.AppDatabase
 import com.trapezo.pos.data.entity.AuditLogEntity
 import com.trapezo.pos.data.entity.SettingEntity
-import androidx.room.withTransaction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
  * Key-value settings backed by the settings table, with typed accessors.
  *
- * Two write layers:
- *  - plain [put]/[putLong] are internal counters (invoice/sku/customer sequences)
- *    and must never be used for admin configuration from the UI;
- *  - [putSetting]/[putLongSetting]/[setPaymentMethodActive] require an active ADMIN
- *    actor and are the only way administrative configuration may be mutated.
+ * Two write classes, no generic public mutation:
+ *  - operational counters (invoice/SKU/customer sequences) — exposed only through the
+ *    narrow [nextInvoiceNumber]/[reserveNextSkuCode]/[reserveNextCustomerCode] allocators;
+ *    consumed by normal business flows, no ADMIN required;
+ *  - admin configuration (tax/service/rounding/printer/store/payment state) — only through
+ *    [putSetting]/[putLongSetting]/[setPaymentMethodActive], which require an active ADMIN.
+ *
+ * The generic [put]/[putLong] remain private: a comment cannot be an authorization boundary.
  */
 class SettingsRepository(private val db: AppDatabase) {
 
@@ -22,13 +25,11 @@ class SettingsRepository(private val db: AppDatabase) {
 
     suspend fun raw(key: String, def: String = ""): String = dao.get(key) ?: def
 
-    /** Internal counter/setting write — do NOT use for admin-visible configuration. */
-    suspend fun put(key: String, value: String) {
+    private suspend fun put(key: String, value: String) {
         if (value.isEmpty()) dao.remove(key) else dao.put(SettingEntity(key = key, value = value))
     }
 
-    /** Internal counter write — do NOT use for admin-visible configuration. */
-    suspend fun putLong(key: String, v: Long) = put(key, v.toString())
+    private suspend fun putLong(key: String, v: Long) = put(key, v.toString())
 
     /** Admin-only configuration write. */
     suspend fun putSetting(key: String, value: String, actorId: Long) = withContext(Dispatchers.IO) {
@@ -76,12 +77,33 @@ class SettingsRepository(private val db: AppDatabase) {
     suspend fun invoicePrefix(): String = raw("pos.invoice_prefix", "INV")
     suspend fun invoiceSeq(): Long = long("pos.invoice_seq", 1)
 
+    // ---- canonical sequence allocators (concurrency-safe; must run inside the caller's transaction) ----
+
+    /** Reserves the next invoice number. Must be called inside the checkout transaction. */
     suspend fun nextInvoiceNumber(): String {
         val seq = long("pos.invoice_seq", 1)
         val num = String.format("%06d", seq)
         val ymd = com.trapezo.pos.utils.Dates.ymd(System.currentTimeMillis()).replace("-", "")
         putLong("pos.invoice_seq", seq + 1)
         return "${invoicePrefix()}-$ymd-$num"
+    }
+
+    /** Reserves the next unused SKU code in a concurrency-safe, transaction-embedded way. */
+    suspend fun reserveNextSkuCode(): String {
+        var seq = long("sku.seq", 1)
+        var candidate: String
+        do {
+            candidate = String.format("TRP-%06d", seq++)
+        } while (db.productDao().skuTaken(candidate, 0) > 0)
+        putLong("sku.seq", seq)
+        return candidate
+    }
+
+    /** Reserves the next customer code (consumed inside the caller's customer-save transaction). */
+    suspend fun reserveNextCustomerCode(): String {
+        val seq = long("customer.seq", 1)
+        putLong("customer.seq", seq + 1)
+        return "CUS-%06d".format(seq)
     }
 
     /** Peek the next invoice number without consuming the sequence (POS header display). */

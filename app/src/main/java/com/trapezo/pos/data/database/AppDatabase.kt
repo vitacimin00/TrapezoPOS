@@ -45,7 +45,7 @@ import com.trapezo.pos.domain.model.RefundRules
         RefundPaymentEntity::class, SettingEntity::class, AuditLogEntity::class
     ],
     version = 5,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao

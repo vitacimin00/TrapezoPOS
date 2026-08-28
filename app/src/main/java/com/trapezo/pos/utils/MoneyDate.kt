@@ -9,6 +9,9 @@ import java.util.Locale
 /** Money helpers: Rupiah formatting/parsing. All amounts are stored as Long rupiah units. */
 object Money {
 
+    /** Maximum legitimate Rupiah amount for a single operational value (9 trillion). */
+    const val MAX_RUPIAH = 9_000_000_000_000L
+
     private val nf: NumberFormat = DecimalFormat("#,##0")
 
     /** 150000 -> "Rp 150.000" */
@@ -17,13 +20,37 @@ object Money {
     /** Same without currency prefix (for inputs) */
     fun num(v: Long): String = nf.format(v)
 
-    /** Parse a user-typed money string ("12.500", "12500", "Rp 12,500") -> 12500 */
-    fun parse(s: String): Long {
-        val digits = s.filter { it.isDigit() }
-        if (digits.isEmpty()) return 0L
-        // Overflow-safe: absurdly long digit strings must not throw NumberFormatException.
-        return digits.toLongOrNull() ?: Long.MAX_VALUE
+    /**
+     * Strictly parses a user-typed Rupiah string into a valid Long, or null when the
+     * input is non-numeric, overflows Long, or exceeds the operational ceiling.
+     * Overflow is never saturated into a plausible value.
+     */
+    fun parseOrNull(s: String, max: Long = MAX_RUPIAH, allowBlank: Boolean = false): Long? {
+        val clean = s.trim()
+        if (clean.isEmpty()) return if (allowBlank) 0L else null
+        val digits = clean.filter { it.isDigit() }
+        if (digits.isEmpty()) return null
+        // A leading "-" or letters produce an entirely-digitless or partial string; only
+        // accept when every non-formatting char was a digit (rejects "-100" as valid 100).
+        if (clean.any { !it.isDigit() && it != '.' && it != ',' && it != ' ' && !it.isWhitespace() && it != 'R' && it != 'p' }) {
+            // permit "Rp", thousand separators and spaces only
+            if (clean.removePrefix("Rp").trim().any { !it.isDigit() && it != '.' && it != ',' && it != ' ' }) return null
+        }
+        if (digits.length > 18) return null // beyond Long capacity by construction
+        val value = digits.toLongOrNull() ?: return null
+        if (value < 0 || value > max) return null
+        return value
     }
+
+    /** Backward-compatible non-throwing parse used only where zero is a legitimate default. */
+    @Deprecated("Use parseOrNull so overflow is rejected, not clamped", ReplaceWith("parseOrNull(s, allowBlank = true) ?: 0L"))
+    fun parse(s: String): Long = parseOrNull(s, allowBlank = true) ?: 0L
+
+    /** Overflow-safe add, returning null instead of wrapping. */
+    fun addExact(a: Long, b: Long): Long? = try { Math.addExact(a, b) } catch (_: ArithmeticException) { null }
+
+    /** Overflow-safe subtract, returning null instead of wrapping. */
+    fun subtractExact(a: Long, b: Long): Long? = try { Math.subtractExact(a, b) } catch (_: ArithmeticException) { null }
 
     /** Quick rounding to nearest 100 for change display */
     fun roundTo(v: Long, step: Long = 100L): Long =

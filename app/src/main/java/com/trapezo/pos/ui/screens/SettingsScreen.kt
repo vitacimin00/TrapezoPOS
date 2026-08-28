@@ -205,10 +205,11 @@ fun SettingsScreen(user: UserEntity) {
                             OutlinedTextField(draft.servicePercent, { draft = draft.copy(servicePercent = it) }, label = { Text("Service charge (%)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                             OutlinedTextField(draft.rounding, { draft = draft.copy(rounding = it) }, label = { Text("Pembulatan (0 / 100 / 500 / 1000)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                             Button(onClick = {
-                                val tax = Money.parse(draft.taxPercent)
-                                val service = Money.parse(draft.servicePercent)
-                                val rounding = Money.parse(draft.rounding)
-                                if (tax > 100 || service > 100) notice = "Pajak dan service charge maksimal 100%"
+                                val tax = Money.parseOrNull(draft.taxPercent)
+                                val service = Money.parseOrNull(draft.servicePercent)
+                                val rounding = Money.parseOrNull(draft.rounding)
+                                if (tax == null || service == null || rounding == null) notice = "Nilai pajak/service/pembulatan tidak valid"
+                                else if (tax > 100 || service > 100) notice = "Pajak dan service charge maksimal 100%"
                                 else {
                                     scope.launch {
                                         AppGraph.settings.putSetting("pos.invoice_prefix", draft.invoicePrefix.trim().ifBlank { "INV" }, user.id)

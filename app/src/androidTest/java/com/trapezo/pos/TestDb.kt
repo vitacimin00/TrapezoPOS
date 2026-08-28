@@ -6,6 +6,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.trapezo.pos.data.database.AppDatabase
 import com.trapezo.pos.data.entity.UserEntity
 import com.trapezo.pos.data.repository.ProductRepository
+import com.trapezo.pos.data.repository.RefundRepository
+import com.trapezo.pos.data.repository.SalesRepository
 import com.trapezo.pos.data.repository.SettingsRepository
 import com.trapezo.pos.data.repository.ShiftRepository
 import com.trapezo.pos.data.repository.StoreRepository
@@ -27,6 +29,8 @@ object TestDb {
     fun store(db: AppDatabase) = StoreRepository(db)
     fun users(db: AppDatabase) = UserRepository(db, db.userDao(), settings(db))
     fun shifts(db: AppDatabase) = ShiftRepository(db)
+    fun sales(db: AppDatabase) = SalesRepository(db, db.saleDao(), settings(db))
+    fun refunds(db: AppDatabase) = RefundRepository(db)
 
     fun admin(active: Boolean = true) =
         UserEntity(username = "admin", passwordHash = "h", name = "Admin", role = "ADMIN", isActive = active)

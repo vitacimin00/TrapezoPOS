@@ -38,7 +38,9 @@ object XlsxModule {
         val headers: List<String>,
         /** Row values keyed by normalized header (trimmed). Missing cells are absent/empty string. */
         val rows: List<Map<String, String>>,
-        val skippedRows: Int
+        val skippedRows: Int,
+        /** Row indices (0-based within rows) that contain at least one formula cell. */
+        val formulaRows: Set<Int> = emptySet()
     )
 
     sealed class CellVal {
@@ -202,6 +204,7 @@ object XlsxModule {
 
         // parse rows
         data class RawCell(var col: Int, var value: String)
+        val formulaCells = HashSet<Int>() // row0*1_000_000 + col0 sentinel tracking
 
         val outRows = ArrayList<List<String?>>()
         var maxCols = 0
@@ -221,6 +224,11 @@ object XlsxModule {
                 val colRow = cellRefSplit(rref) ?: return@forEach
                 val type = stripNs(attrs, "t") ?: "n"
                 val styleIdx = stripNs(attrs, "s")?.toIntOrNull() ?: 0
+
+                // Formula cells: a <f> element means the cell's cached <v> is a computed
+                // result, not a trusted static value. Mark it so the product importer can
+                // reject the row rather than silently consuming a formula outcome.
+                val isFormula = Regex("<f[ >]").containsMatchIn(body)
 
                 var text: String? = null
                 when (type) {
@@ -252,6 +260,7 @@ object XlsxModule {
                     text = "" // self-closed empty cell keeps grid alignment
                 }
                 if (text != null) cells.add(RawCell(colRow.first, text))
+                if (isFormula) formulaCells.add(colRow.second)
             }
             if (cells.isNotEmpty()) {
                 val lastCol = cells.maxOf { it.col }
@@ -280,7 +289,13 @@ object XlsxModule {
             }
             dataRows.add(m)
         }
-        return ReadResult(orderedSheets.map { it.name }, chosen.name, usedHeaders, dataRows, outRows.size - headerIdx - 1)
+        // Map raw sheet row indices to dataRow indices for the importer.
+        val headerRawIndex = headerIdx
+        val formulaDataRows = formulaCells.mapNotNull { rawRow ->
+            val dataIdx = rawRow - headerRawIndex - 1
+            if (dataIdx >= 0) dataIdx else null
+        }.toSet()
+        return ReadResult(orderedSheets.map { it.name }, chosen.name, usedHeaders, dataRows, outRows.size - headerIdx - 1, formulaDataRows)
     }
 
     private fun readBounded(zin: InputStream): ByteArray {

@@ -6,6 +6,10 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use(::load)
@@ -18,6 +22,11 @@ val releaseSigningReady = keystorePropsFile.exists() &&
 android {
     namespace = "com.trapezo.pos"
     compileSdk = 36
+
+    sourceSets {
+        // Room schema export location, required by MigrationTestHelper.
+        getByName("androidTest").assets.srcDirs("$projectDir/schemas")
+    }
 
     defaultConfig {
         applicationId = "com.trapezo.pos"
