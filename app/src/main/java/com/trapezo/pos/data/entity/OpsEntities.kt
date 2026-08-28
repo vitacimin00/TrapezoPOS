@@ -1,5 +1,6 @@
 package com.trapezo.pos.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -7,7 +8,13 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "shifts",
-    indices = [Index(value = ["userId"]), Index(value = ["status"]), Index(value = ["openedAt"])]
+    indices = [
+        Index(value = ["userId"]),
+        Index(value = ["status"]),
+        Index(value = ["openedAt"]),
+        // SQLite UNIQUE permits many NULLs but only one OPEN sentinel (=1).
+        Index(value = ["openGuard"], unique = true)
+    ]
 )
 data class ShiftEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -23,7 +30,8 @@ data class ShiftEntity(
     val difference: Long = 0,
     val openedAt: Long = System.currentTimeMillis(),
     val closedAt: Long? = null,
-    val status: String = "OPEN" // OPEN | CLOSED
+    val status: String = "OPEN",
+    @ColumnInfo(defaultValue = "NULL") val openGuard: Int? = 1
 )
 
 @Entity(
@@ -39,17 +47,14 @@ data class ShiftEntity(
 data class CashMovementEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val shiftId: Long,
-    val type: String, // CASH_IN | CASH_OUT
+    val type: String,
     val amount: Long,
     val note: String = "",
     val userId: Long? = null,
     val createdAt: Long = System.currentTimeMillis()
 )
 
-@Entity(
-    tableName = "audit_logs",
-    indices = [Index(value = ["userId"]), Index(value = ["createdAt"])]
-)
+@Entity(tableName = "audit_logs", indices = [Index(value = ["userId"]), Index(value = ["createdAt"])])
 data class AuditLogEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val userId: Long? = null,

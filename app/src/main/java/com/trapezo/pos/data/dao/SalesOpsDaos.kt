@@ -25,18 +25,10 @@ data class RefundMethodTotal(val method: String, val total: Long)
 
 @Dao
 interface SaleDao {
-
-    @Insert
-    suspend fun insertSale(s: SaleEntity): Long
-
-    @Insert
-    suspend fun insertItems(items: List<SaleItemEntity>)
-
-    @Insert
-    suspend fun insertPayment(p: PaymentEntity): Long
-
-    @Insert
-    suspend fun insertPayments(ps: List<PaymentEntity>)
+    @Insert suspend fun insertSale(s: SaleEntity): Long
+    @Insert suspend fun insertItems(items: List<SaleItemEntity>)
+    @Insert suspend fun insertPayment(p: PaymentEntity): Long
+    @Insert suspend fun insertPayments(ps: List<PaymentEntity>)
 
     @Transaction
     suspend fun saveFullSale(sale: SaleEntity, items: List<SaleItemEntity>, payments: List<PaymentEntity>): Long {
@@ -64,28 +56,25 @@ interface SaleDao {
     @Query("SELECT * FROM payments WHERE saleId=:saleId ORDER BY id ASC")
     suspend fun paymentsFor(saleId: Long): List<PaymentEntity>
 
-    /** Dynamic filtered+paged history (filters built safely in repository with bound args). */
     @RawQuery(observedEntities = [SaleEntity::class])
     suspend fun historyRaw(query: SupportSQLiteQuery): List<SaleEntity>
 
     @RawQuery(observedEntities = [SaleEntity::class])
     suspend fun countRaw(query: SupportSQLiteQuery): Int
 
-    // Net sales for a period: sales are recognized on sale.createdAt, refunds on refund.createdAt.
     @Query(
         """SELECT
              COALESCE((SELECT SUM(s.grandTotal) FROM sales s
                        WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'), 0)
-             -
-             COALESCE((SELECT SUM(r.total) FROM refunds r
-                       WHERE r.createdAt BETWEEN :from AND :to), 0) AS total,
+             - COALESCE((SELECT SUM(r.total) FROM refunds r
+                         WHERE r.createdAt BETWEEN :from AND :to), 0) AS total,
              (SELECT COUNT(*) FROM sales s2
               WHERE s2.createdAt BETWEEN :from AND :to AND s2.transactionStatus != 'VOID') AS cnt"""
     )
     suspend fun totalsBetween(from: Long, to: Long): TotalRow
 
     @Query(
-        """SELECT method, SUM(amount) AS total, SUM(saleCount) AS cnt
+        """SELECT method, SUM(amount) AS total, CAST(SUM(saleCount) AS INTEGER) AS cnt
            FROM (
                SELECT p.method AS method, SUM(p.amount) AS amount,
                       COUNT(DISTINCT p.saleId) AS saleCount
@@ -103,7 +92,7 @@ interface SaleDao {
     suspend fun totalsByMethod(from: Long, to: Long): List<MethodTotalRow>
 
     @Query(
-        """SELECT COALESCE(SUM(qty),0) AS totalQty, COALESCE(SUM(lineCount),0) AS lines
+        """SELECT COALESCE(SUM(qty),0) AS totalQty, CAST(COALESCE(SUM(lineCount),0) AS INTEGER) AS lines
            FROM (
                SELECT SUM(si.quantity) AS qty, COUNT(si.id) AS lineCount
                FROM sale_items si JOIN sales s ON s.id = si.saleId
@@ -137,7 +126,7 @@ interface SaleDao {
     suspend fun topProducts(from: Long, to: Long, limit: Int): List<TopProduct>
 
     @Query(
-        """SELECT userName, SUM(txCount) AS txCount, SUM(total) AS total
+        """SELECT userName, CAST(SUM(txCount) AS INTEGER) AS txCount, SUM(total) AS total
            FROM (
                SELECT COALESCE(s.userNameSnapshot,'?') AS userName,
                       COUNT(*) AS txCount, SUM(s.grandTotal) AS total
@@ -162,14 +151,9 @@ interface SaleDao {
 
 @Dao
 interface RefundDao {
-    @Insert
-    suspend fun insertRefund(r: com.trapezo.pos.data.entity.RefundEntity): Long
-
-    @Insert
-    suspend fun insertRefundItems(items: List<com.trapezo.pos.data.entity.RefundItemEntity>)
-
-    @Insert
-    suspend fun insertRefundPayments(items: List<RefundPaymentEntity>)
+    @Insert suspend fun insertRefund(r: com.trapezo.pos.data.entity.RefundEntity): Long
+    @Insert suspend fun insertRefundItems(items: List<com.trapezo.pos.data.entity.RefundItemEntity>)
+    @Insert suspend fun insertRefundPayments(items: List<RefundPaymentEntity>)
 
     @Query("SELECT * FROM refunds WHERE saleId=:saleId ORDER BY id ASC")
     suspend fun refundsForSale(saleId: Long): List<com.trapezo.pos.data.entity.RefundEntity>
@@ -201,12 +185,22 @@ interface RefundDao {
 
 @Dao
 interface ShiftDao {
+    @Insert suspend fun openShift(s: ShiftEntity): Long
 
-    @Insert
-    suspend fun openShift(s: ShiftEntity): Long
-
-    @Query("UPDATE shifts SET totalCashSales=:totalCashSales, totalNonCashSales=:nonCash, expectedCash=:expected, actualCash=:actual, difference=:diff, closedAt=:closedAt, status='CLOSED' WHERE id=:id")
-    suspend fun closeShift(id: Long, totalCashSales: Long, nonCash: Long, expected: Long, actual: Long, diff: Long, closedAt: Long)
+    @Query(
+        """UPDATE shifts SET totalCashSales=:totalCashSales, totalNonCashSales=:nonCash,
+           expectedCash=:expected, actualCash=:actual, difference=:diff, closedAt=:closedAt,
+           status='CLOSED', openGuard=NULL WHERE id=:id AND status='OPEN'"""
+    )
+    suspend fun closeShift(
+        id: Long,
+        totalCashSales: Long,
+        nonCash: Long,
+        expected: Long,
+        actual: Long,
+        diff: Long,
+        closedAt: Long
+    ): Int
 
     @Query("SELECT * FROM shifts WHERE status='OPEN' ORDER BY openedAt DESC LIMIT 1")
     suspend fun anyOpenShift(): ShiftEntity?
@@ -214,9 +208,9 @@ interface ShiftDao {
     @Query(
         """UPDATE shifts SET totalCashSales = totalCashSales + :cashAmt,
            totalNonCashSales = totalNonCashSales + :nonCashAmt,
-           expectedCash = expectedCash + :cashAmt WHERE id=:id"""
+           expectedCash = expectedCash + :cashAmt WHERE id=:id AND status='OPEN'"""
     )
-    suspend fun addSaleTotals(id: Long, cashAmt: Long, nonCashAmt: Long)
+    suspend fun addSaleTotals(id: Long, cashAmt: Long, nonCashAmt: Long): Int
 
     @Query(
         """UPDATE shifts SET totalCashSales = totalCashSales - :cashAmt,
@@ -225,6 +219,18 @@ interface ShiftDao {
            WHERE id=:id AND status='OPEN'"""
     )
     suspend fun addRefundTotals(id: Long, cashAmt: Long, nonCashAmt: Long): Int
+
+    @Query(
+        """UPDATE shifts SET cashIn=cashIn+:amount, expectedCash=expectedCash+:amount
+           WHERE id=:id AND status='OPEN' AND userId=:userId"""
+    )
+    suspend fun addCashIn(id: Long, userId: Long, amount: Long): Int
+
+    @Query(
+        """UPDATE shifts SET cashOut=cashOut+:amount, expectedCash=expectedCash-:amount
+           WHERE id=:id AND status='OPEN' AND userId=:userId AND expectedCash>=:amount"""
+    )
+    suspend fun addCashOut(id: Long, userId: Long, amount: Long): Int
 
     @Query("SELECT * FROM shifts WHERE userId=:userId AND status='OPEN' ORDER BY openedAt DESC LIMIT 1")
     suspend fun openShiftForUser(userId: Long): ShiftEntity?
@@ -235,8 +241,7 @@ interface ShiftDao {
     @Query("SELECT * FROM shifts WHERE id=:id")
     suspend fun byId(id: Long): ShiftEntity?
 
-    @Insert
-    suspend fun addCash(m: CashMovementEntity): Long
+    @Insert suspend fun addCash(m: CashMovementEntity): Long
 
     @Query("SELECT * FROM cash_movements WHERE shiftId=:shiftId ORDER BY createdAt ASC")
     suspend fun cashMovements(shiftId: Long): List<CashMovementEntity>
@@ -259,8 +264,7 @@ interface SettingsDao {
     @Query("DELETE FROM settings WHERE `key`=:key")
     suspend fun remove(key: String)
 
-    @Insert
-    suspend fun insertAudit(a: AuditLogEntity): Long
+    @Insert suspend fun insertAudit(a: AuditLogEntity): Long
 
     @Query("SELECT * FROM audit_logs ORDER BY createdAt DESC LIMIT :limit OFFSET :offset")
     suspend fun audits(limit: Int, offset: Int): List<AuditLogEntity>

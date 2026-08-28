@@ -18,14 +18,13 @@ class ProductRepository(
     private val inventoryDao: InventoryDao,
     private val settings: SettingsRepository
 ) {
-
-    // ---------- queries ----------
-    suspend fun page(query: String, categoryId: Long?, includeInactive: Boolean, sort: String, page: Int, pageSize: Int = 50)
-        = withContext(Dispatchers.IO) {
-        val list = productDao.page(query.trim(), categoryId, includeInactive, sort, pageSize, page * pageSize)
-        val total = productDao.countPage(query.trim(), categoryId, includeInactive)
-        Pair(list, total)
-    }
+    suspend fun page(query: String, categoryId: Long?, includeInactive: Boolean, sort: String, page: Int, pageSize: Int = 50) =
+        withContext(Dispatchers.IO) {
+            Pair(
+                productDao.page(query.trim(), categoryId, includeInactive, sort, pageSize, page * pageSize),
+                productDao.countPage(query.trim(), categoryId, includeInactive)
+            )
+        }
 
     suspend fun posSearch(q: String, limit: Int = 60, offset: Int = 0): List<ProductEntity> =
         withContext(Dispatchers.IO) { productDao.posSearch(q.trim(), limit, offset) }
@@ -33,188 +32,202 @@ class ProductRepository(
     suspend fun byId(id: Long): ProductEntity? = withContext(Dispatchers.IO) { productDao.byId(id) }
 
     suspend fun byBarcode(code: String): ProductEntity? = withContext(Dispatchers.IO) {
-        val c = code.trim()
-        if (c.isEmpty()) return@withContext null
-        productDao.byBarcode(c) ?: productDao.bySku(c)
-        // multi-barcode table is checked by the POS flow when the primary lookup misses
+        val clean = code.trim()
+        if (clean.isEmpty()) return@withContext null
+        productDao.byBarcode(clean) ?: productDao.bySku(clean)
     }
 
     suspend fun barcodeInExtraTable(code: String): ProductEntity? = withContext(Dispatchers.IO) {
         db.openHelper.writableDatabase.query(
-            "SELECT p.* FROM products p JOIN product_barcodes b ON b.productId=p.id WHERE b.barcode=? LIMIT 1",
+            "SELECT p.* FROM products p JOIN product_barcodes b ON b.productId=p.id WHERE b.barcode=? AND p.isActive=1 LIMIT 1",
             arrayOf(code.trim())
         ).use { cur ->
-            if (cur.moveToFirst()) {
-                var i = 0
-                fun s(name: String): String? { val idx = cur.getColumnIndex(name); return if (idx >= 0) (if (cur.isNull(idx)) null else cur.getString(idx)) else null }
-                fun l(name: String): Long? { val idx = cur.getColumnIndex(name); return if (idx >= 0 && !cur.isNull(idx)) cur.getLong(idx) else null }
-                fun d(name: String): Double { val idx = cur.getColumnIndex(name); return if (idx >= 0 && !cur.isNull(idx)) cur.getDouble(idx) else 0.0 }
-                fun bl(name: String): Boolean { val v = l(name); return v != null && v != 0L }
-                ProductEntity(
-                    id = l("id") ?: 0,
-                    name = s("name") ?: "",
-                    alternativeName = s("alternativeName") ?: "",
-                    categoryId = l("categoryId"),
-                    brand = s("brand") ?: "",
-                    sku = s("sku") ?: "",
-                    barcode = s("barcode") ?: "",
-                    buyPrice = l("buyPrice") ?: 0,
-                    marketPrice = l("marketPrice") ?: 0,
-                    sellPrice = l("sellPrice") ?: 0,
-                    posSellPrice = l("posSellPrice") ?: 0,
-                    dynamicPriceEnabled = bl("dynamicPriceEnabled"),
-                    commission = l("commission") ?: 0,
-                    customerCommission = l("customerCommission") ?: 0,
-                    customerCommissionPercentage = bl("customerCommissionPercentage"),
-                    trackInventory = bl("trackInventory"),
-                    stockQty = l("stockQty") ?: 0,
-                    lowStockAlert = l("lowStockAlert") ?: 5,
-                    uom = s("uom") ?: "PCS",
-                    uomName = s("uomName") ?: "Pieces",
-                    uomConverter = d("uomConverter"),
-                    uomBuyPrice = l("uomBuyPrice") ?: 0,
-                    uomSellPrice = l("uomSellPrice") ?: 0,
-                    uomSellPricePos = l("uomSellPricePos") ?: 0,
-                    qtyFastMoving = l("qtyFastMoving") ?: 0,
-                    weightKg = d("weightKg"),
-                    loyaltyPoints = l("loyaltyPoints") ?: 0,
-                    published = bl("published"),
-                    posHidden = bl("posHidden"),
-                    description = s("description") ?: "",
-                    photo = s("photo"),
-                    notes = s("notes") ?: "",
-                    taxFreeItem = bl("taxFreeItem"),
-                    nonServiceCharge = bl("nonServiceCharge"),
-                    isActive = bl("isActive")
-                )
-            } else null
+            if (!cur.moveToFirst()) return@use null
+            fun s(name: String): String? { val i = cur.getColumnIndex(name); return if (i >= 0 && !cur.isNull(i)) cur.getString(i) else null }
+            fun l(name: String): Long? { val i = cur.getColumnIndex(name); return if (i >= 0 && !cur.isNull(i)) cur.getLong(i) else null }
+            fun d(name: String): Double { val i = cur.getColumnIndex(name); return if (i >= 0 && !cur.isNull(i)) cur.getDouble(i) else 0.0 }
+            fun b(name: String): Boolean = (l(name) ?: 0L) != 0L
+            ProductEntity(
+                id = l("id") ?: 0,
+                name = s("name") ?: "",
+                alternativeName = s("alternativeName") ?: "",
+                categoryId = l("categoryId"), brand = s("brand") ?: "", sku = s("sku") ?: "", barcode = s("barcode") ?: "",
+                buyPrice = l("buyPrice") ?: 0, marketPrice = l("marketPrice") ?: 0, sellPrice = l("sellPrice") ?: 0,
+                posSellPrice = l("posSellPrice") ?: 0, dynamicPriceEnabled = b("dynamicPriceEnabled"), commission = l("commission") ?: 0,
+                customerCommission = l("customerCommission") ?: 0, customerCommissionPercentage = b("customerCommissionPercentage"),
+                trackInventory = b("trackInventory"), stockQty = l("stockQty") ?: 0, lowStockAlert = l("lowStockAlert") ?: 5,
+                uom = s("uom") ?: "PCS", uomName = s("uomName") ?: "Pieces", uomConverter = d("uomConverter"),
+                uomBuyPrice = l("uomBuyPrice") ?: 0, uomSellPrice = l("uomSellPrice") ?: 0, uomSellPricePos = l("uomSellPricePos") ?: 0,
+                qtyFastMoving = l("qtyFastMoving") ?: 0, weightKg = d("weightKg"), loyaltyPoints = l("loyaltyPoints") ?: 0,
+                published = b("published"), posHidden = b("posHidden"), description = s("description") ?: "", photo = s("photo"),
+                notes = s("notes") ?: "", taxFreeItem = b("taxFreeItem"), nonServiceCharge = b("nonServiceCharge"), isActive = b("isActive")
+            )
         }
     }
 
     suspend fun lowStock(): List<ProductEntity> = withContext(Dispatchers.IO) { productDao.lowStock() }
     suspend fun outOfStock(): List<ProductEntity> = withContext(Dispatchers.IO) { productDao.outOfStock() }
 
-    // ---------- mutations ----------
     data class SaveResult(val ok: Boolean, val error: String?, val id: Long)
+    private class Validation(message: String) : RuntimeException(message)
 
-    suspend fun save(p: ProductEntity, initialQtyOverride: Long? = null): SaveResult {
-        return withContext(Dispatchers.IO) {
-            // validations
-            if (p.name.isBlank()) return@withContext SaveResult(false, "Nama produk wajib diisi", 0)
-            if (p.barcode.isNotBlank() && productDao.barcodeTaken(p.barcode, p.id) > 0)
-                return@withContext SaveResult(false, "Barcode sudah dipakai produk lain", 0)
-            if (p.sku.isNotBlank() && productDao.skuTaken(p.sku, p.id) > 0)
-                return@withContext SaveResult(false, "SKU sudah dipakai produk lain", 0)
-
-            val isNew = p.id == 0L
-            if (isNew) {
-                var entity = p
-                if (entity.sku.isBlank()) {
-                    // auto SKU TRP-000001
-                    val seq = settings.long("sku.seq", 1)
-                    entity = entity.copy(sku = String.format("TRP-%06d", seq))
-                    settings.putLong("sku.seq", seq + 1)
+    suspend fun save(p: ProductEntity, initialQtyOverride: Long? = null): SaveResult = withContext(Dispatchers.IO) {
+        if (p.name.isBlank()) return@withContext SaveResult(false, "Nama produk wajib diisi", 0)
+        if (listOf(p.buyPrice, p.marketPrice, p.sellPrice, p.posSellPrice, p.lowStockAlert).any { it < 0 }) {
+            return@withContext SaveResult(false, "Harga dan batas stok tidak boleh negatif", p.id)
+        }
+        try {
+            var resultId = p.id
+            db.withTransaction {
+                var entity = p.copy(name = p.name.trim(), sku = p.sku.trim(), barcode = p.barcode.trim())
+                if (entity.barcode.isNotBlank() && productDao.barcodeTaken(entity.barcode, entity.id) > 0) {
+                    throw Validation("Barcode sudah dipakai produk lain")
                 }
-                val price = entity.posSellPrice.takeIf { it > 0 } ?: entity.sellPrice
-                entity = entity.copy(posSellPrice = price)
-                val id = productDao.insert(entity)
-                val initQty = initialQtyOverride ?: entity.stockQty
-                if (entity.trackInventory && initQty != 0L) {
-                    productDao.setQty(id, initQty)
-                    inventoryDao.insert(
-                        InventoryMovementEntity(
-                            productId = id, type = "INITIAL", quantity = initQty,
-                            note = "Stok awal", userId = null
+                if (entity.sku.isNotBlank() && productDao.skuTaken(entity.sku, entity.id) > 0) {
+                    throw Validation("SKU sudah dipakai produk lain")
+                }
+
+                if (entity.id == 0L) {
+                    if (entity.sku.isBlank()) {
+                        var candidate: String
+                        do {
+                            val seq = settings.long("sku.seq", 1)
+                            candidate = String.format("TRP-%06d", seq)
+                            settings.putLong("sku.seq", seq + 1)
+                        } while (productDao.skuTaken(candidate, 0) > 0)
+                        entity = entity.copy(sku = candidate)
+                    }
+                    val initial = initialQtyOverride ?: entity.stockQty
+                    if (initial < 0) throw Validation("Stok awal tidak boleh negatif")
+                    val posPrice = entity.posSellPrice.takeIf { it > 0 } ?: entity.sellPrice
+                    // Insert with zero first so stock and INITIAL movement become one indivisible write.
+                    val inserted = entity.copy(stockQty = if (entity.trackInventory) 0 else entity.stockQty, posSellPrice = posPrice)
+                    resultId = productDao.insert(inserted)
+                    if (inserted.trackInventory && initial != 0L) {
+                        productDao.setQty(resultId, initial)
+                        inventoryDao.insert(
+                            InventoryMovementEntity(
+                                productId = resultId,
+                                type = "INITIAL",
+                                quantity = initial,
+                                note = "Stok awal"
+                            )
+                        )
+                    }
+                    settings.audit(null, "PRODUCT_CREATE", "product", resultId, "Tambah produk ${inserted.name}")
+                } else {
+                    val current = productDao.byId(entity.id) ?: throw Validation("Produk tidak ditemukan")
+                    productDao.update(
+                        entity.copy(
+                            stockQty = current.stockQty,
+                            isActive = current.isActive,
+                            createdAt = current.createdAt,
+                            updatedAt = System.currentTimeMillis()
                         )
                     )
+                    settings.audit(null, "PRODUCT_UPDATE", "product", entity.id, "Edit produk ${entity.name}")
                 }
-                settings.audit(null, "PRODUCT_CREATE", "product", id, "Tambah produk ${entity.name}")
-                SaveResult(true, null, id)
-            } else {
-                // Stock is immutable through the general product editor. All stock changes
-                // must pass through adjustStock()/import so an inventory movement exists.
-                val current = productDao.byId(p.id)
-                    ?: return@withContext SaveResult(false, "Produk tidak ditemukan", p.id)
-                productDao.update(
-                    p.copy(
-                        stockQty = current.stockQty,
-                        createdAt = current.createdAt,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-                settings.audit(null, "PRODUCT_UPDATE", "product", p.id, "Edit produk ${p.name}")
-                SaveResult(true, null, p.id)
             }
+            SaveResult(true, null, resultId)
+        } catch (e: Exception) {
+            SaveResult(false, e.message ?: "Gagal menyimpan produk", p.id)
         }
     }
 
     suspend fun softDelete(p: ProductEntity) = withContext(Dispatchers.IO) {
-        productDao.softDelete(p.id)
-        settings.audit(null, "PRODUCT_DEACTIVATE", "product", p.id, "Nonaktifkan produk ${p.name}")
+        db.withTransaction {
+            productDao.softDelete(p.id)
+            settings.audit(null, "PRODUCT_DEACTIVATE", "product", p.id, "Nonaktifkan produk ${p.name}")
+        }
     }
 
     suspend fun hardDeleteIfUnused(id: Long): Boolean = withContext(Dispatchers.IO) {
-        val used = db.openHelper.writableDatabase
-            .compileStatement("SELECT COUNT(*) FROM sale_items WHERE productId=?").use { st ->
+        var deleted = false
+        db.withTransaction {
+            val used = db.openHelper.writableDatabase.compileStatement("SELECT COUNT(*) FROM sale_items WHERE productId=?").use { st ->
                 st.bindLong(1, id); st.simpleQueryForLong()
             }
-        if (used > 0) false else {
-            productDao.hardDelete(id); true
+            if (used == 0L) { productDao.hardDelete(id); deleted = true }
         }
+        deleted
     }
 
-    suspend fun adjustStock(product: ProductEntity, mode: String, amount: Long, reason: String, userId: Long?): Boolean {
-        return withContext(Dispatchers.IO) {
-            android.util.Log.d("ProductRepo", "adjustStock id=${product.id} mode=$mode amount=$amount")
-            val delta = when (mode) {
-                "ADD" -> amount
-                "REMOVE" -> {
-                    val current = productDao.stockOf(product.id) ?: 0L
-                    if (amount > current) return@withContext false
-                    -amount
-                }
-                "SET" -> {
-                    val cur = productDao.stockOf(product.id) ?: 0
-                    amount - cur
-                }
-                else -> return@withContext false
-            }
-            db.withTransaction {
-                productDao.applyDelta(product.id, delta)
-                inventoryDao.insert(
-                    InventoryMovementEntity(
-                        productId = product.id,
-                        type = when (mode) { "ADD" -> "ADJUST_ADD"; "REMOVE" -> "ADJUST_REMOVE"; else -> "ADJUST_SET" },
-                        quantity = delta,
-                        note = reason, userId = userId
+    suspend fun adjustStock(product: ProductEntity, mode: String, amount: Long, reason: String, userId: Long?): Boolean =
+        withContext(Dispatchers.IO) {
+            if (mode !in setOf("ADD", "REMOVE", "SET")) return@withContext false
+            if ((mode == "SET" && amount < 0) || (mode != "SET" && amount <= 0)) return@withContext false
+            try {
+                db.withTransaction {
+                    if (userId != null) {
+                        val actor = db.userDao().byId(userId) ?: throw Validation("Akun tidak ditemukan")
+                        if (!actor.isActive || actor.role != "ADMIN") throw Validation("Penyesuaian stok hanya untuk admin")
+                    }
+                    val current = productDao.byId(product.id) ?: throw Validation("Produk tidak ditemukan")
+                    if (!current.trackInventory) throw Validation("Produk ini tidak melacak stok")
+                    val delta = when (mode) {
+                        "ADD" -> amount
+                        "REMOVE" -> {
+                            if (amount > current.stockQty) throw Validation("Stok tidak cukup")
+                            -amount
+                        }
+                        else -> amount - current.stockQty
+                    }
+                    val newQty = current.stockQty + delta
+                    if (newQty < 0) throw Validation("Stok tidak boleh negatif")
+                    productDao.setQty(current.id, newQty)
+                    inventoryDao.insert(
+                        InventoryMovementEntity(
+                            productId = current.id,
+                            type = when (mode) { "ADD" -> "ADJUST_ADD"; "REMOVE" -> "ADJUST_REMOVE"; else -> "ADJUST_SET" },
+                            quantity = delta,
+                            note = reason.trim(),
+                            userId = userId
+                        )
                     )
-                )
+                    settings.audit(userId, "STOCK_ADJUST", "product", current.id, "$mode $amount (${reason.trim()}) untuk ${current.name}")
+                }
+                true
+            } catch (_: Exception) {
+                false
             }
-            settings.audit(userId, "STOCK_ADJUST", "product", product.id, "$mode $amount (${reason}) untuk ${product.name}")
-            true
         }
-    }
 
-    // ---------- categories ----------
-    suspend fun categoriesAll(): List<CategoryEntity> = categoryDao.all()
+    suspend fun categoriesAll(): List<CategoryEntity> = withContext(Dispatchers.IO) { categoryDao.all() }
     fun categoriesFlow() = categoryDao.allFlow()
 
     data class CatResult(val ok: Boolean, val error: String?)
+
     suspend fun saveCategory(c: CategoryEntity): CatResult = withContext(Dispatchers.IO) {
         if (c.name.isBlank()) return@withContext CatResult(false, "Nama kategori wajib")
-        val dup = categoryDao.byName(c.name.trim())
-        if (dup != null && dup.id != c.id) return@withContext CatResult(false, "Kategori sudah ada")
-        if (c.id == 0L) categoryDao.insert(c.copy(name = c.name.trim())) else categoryDao.update(c.copy(name = c.name.trim(), updatedAt = System.currentTimeMillis()))
-        CatResult(true, null)
+        try {
+            db.withTransaction {
+                val name = c.name.trim()
+                val dup = categoryDao.byName(name)
+                if (dup != null && dup.id != c.id) throw Validation("Kategori sudah ada")
+                if (c.id == 0L) categoryDao.insert(c.copy(name = name))
+                else categoryDao.update(c.copy(name = name, updatedAt = System.currentTimeMillis()))
+            }
+            CatResult(true, null)
+        } catch (e: Exception) {
+            CatResult(false, e.message ?: "Gagal menyimpan kategori")
+        }
     }
 
     suspend fun deleteCategorySafe(id: Long): Pair<Boolean, String> = withContext(Dispatchers.IO) {
-        val used = categoryDao.productsUsing(id)
-        if (used > 0) Pair(false, "Kategori dipakai oleh $used produk; nonaktifkan saja.")
-        else { categoryDao.delete(id); Pair(true, "Terhapus") }
+        try {
+            var message = "Terhapus"
+            db.withTransaction {
+                val used = categoryDao.productsUsing(id)
+                if (used > 0) throw Validation("Kategori dipakai oleh $used produk; nonaktifkan saja.")
+                categoryDao.delete(id)
+            }
+            Pair(true, message)
+        } catch (e: Exception) {
+            Pair(false, e.message ?: "Gagal menghapus kategori")
+        }
     }
 
     suspend fun setCategoryActive(id: Long, active: Boolean) = withContext(Dispatchers.IO) {
-        categoryDao.setActive(id, active)
+        db.withTransaction { categoryDao.setActive(id, active) }
     }
 }
