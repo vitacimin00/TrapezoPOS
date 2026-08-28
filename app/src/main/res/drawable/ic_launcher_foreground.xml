@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original Trapezo mark: white trapezoid outline forming a stylised T -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Background glow square removed; keep transparent for adaptive layer -->
+
+    <!-- Trapezoid shape (wide top, narrow bottom) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M32,34 L76,34 L64,74 L44,74 Z" />
+
+    <!-- Inner dark cut to suggest letter T counter-space -->
+    <path
+        android:fillColor="#00392A"
+        android:pathData="M40,40 L68,40 L59,68 L49,68 Z" />
+
+    <!-- Accent bar across the top -->
+    <path
+        android:fillColor="#00C48C"
+        android:pathData="M30,29 L78,29 L78,33 L30,33 Z" />
+</vector>

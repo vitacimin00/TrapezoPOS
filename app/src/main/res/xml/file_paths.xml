@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="receipts" path="receipts/" />
+    <files-path name="exports" path="exports/" />
+    <files-path name="backups" path="backups/" />
+    <files-path name="product_photos" path="product_photos/" />
+    <files-path name="store_media" path="store_media/" />
+</paths>

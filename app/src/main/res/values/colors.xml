@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Trapezo brand palette — green primary -->
+    <color name="trapezo_primary">#00875A</color>
+    <color name="trapezo_primary_dark">#00392A</color>
+    <color name="trapezo_accent">#00C48C</color>
+    <color name="ic_launcher_background">#00392A</color>
+</resources>
