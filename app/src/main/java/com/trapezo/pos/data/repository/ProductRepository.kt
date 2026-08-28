@@ -26,6 +26,17 @@ class ProductRepository(
             )
         }
 
+    /** Unified listing with composable stock-state filter (Track D). */
+    suspend fun filteredPage(
+        query: String, categoryId: Long?, lifecycle: String, trackedOnly: Boolean,
+        stockState: String, sort: String, page: Int, pageSize: Int = 50
+    ): Pair<List<ProductEntity>, Int> = withContext(Dispatchers.IO) {
+        Pair(
+            productDao.filteredPage(query.trim(), categoryId, lifecycle, trackedOnly, stockState, sort, pageSize, page * pageSize),
+            productDao.countFiltered(query.trim(), categoryId, lifecycle, trackedOnly, stockState)
+        )
+    }
+
     suspend fun posSearch(q: String, limit: Int = 60, offset: Int = 0): List<ProductEntity> =
         withContext(Dispatchers.IO) { productDao.posSearch(q.trim(), limit, offset) }
 

@@ -39,6 +39,7 @@ import com.trapezo.pos.AppGraph
 import com.trapezo.pos.data.entity.CustomerEntity
 import com.trapezo.pos.data.entity.UserEntity
 import com.trapezo.pos.utils.Money
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -49,11 +50,28 @@ fun CustomersScreen(user: UserEntity) {
     var query by remember { mutableStateOf("") }
     var customers by remember { mutableStateOf(emptyList<CustomerEntity>()) }
     var total by remember { mutableStateOf(0) }
+    var page by remember { mutableStateOf(0) }
+    var debouncedQuery by remember { mutableStateOf("") }
+    var requestVersion by remember { mutableStateOf(0L) }
     var form by remember { mutableStateOf<CustomerEntity?>(null) }
     var add by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
-    fun refresh() { scope.launch { val result = AppGraph.customers.page(query); customers = result.first; total = result.second } }
-    LaunchedEffect(query) { refresh() }
+    fun reloadFirstPage() { page = 0; requestVersion++ }
+    LaunchedEffect(query) {
+        delay(300)
+        debouncedQuery = query
+        page = 0
+    }
+    LaunchedEffect(debouncedQuery, page, requestVersion) {
+        val requestedQuery = debouncedQuery
+        val requestedPage = page
+        val version = requestVersion
+        val result = AppGraph.customers.page(requestedQuery, requestedPage)
+        if (requestedQuery == debouncedQuery && requestedPage == page && version == requestVersion) {
+            customers = if (requestedPage == 0) result.first else (customers + result.first).distinctBy { it.id }
+            total = result.second
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -83,6 +101,7 @@ fun CustomersScreen(user: UserEntity) {
                             }
                         }
                     }
+                    item { if (customers.size < total) TextButton(onClick = { page++ }, modifier = Modifier.fillMaxWidth()) { Text("Muat lebih banyak") } }
                 }
             }
         }
@@ -91,7 +110,7 @@ fun CustomersScreen(user: UserEntity) {
     if (add) CustomerEditor(null, onDismiss = { add = false }, onSave = {
         scope.launch {
             val result = AppGraph.customers.save(it, user.id)
-            if (result.error == null) { add = false; notice = "Customer tersimpan"; refresh() } else notice = result.error
+            if (result.error == null) { add = false; notice = "Customer tersimpan"; reloadFirstPage() } else notice = result.error
         }
     })
     form?.let { existing ->
@@ -101,13 +120,13 @@ fun CustomersScreen(user: UserEntity) {
             onSave = {
                 scope.launch {
                     val result = AppGraph.customers.save(it, user.id)
-                    if (result.error == null) { form = null; notice = "Customer diperbarui"; refresh() } else notice = result.error
+                    if (result.error == null) { form = null; notice = "Customer diperbarui"; reloadFirstPage() } else notice = result.error
                 }
             },
             onDelete = {
                 scope.launch {
                     val error = AppGraph.customers.delete(existing, user.id)
-                    if (error == null) { form = null; notice = "Customer dihapus"; refresh() } else notice = error
+                    if (error == null) { form = null; notice = "Customer dihapus"; reloadFirstPage() } else notice = error
                 }
             }
         )

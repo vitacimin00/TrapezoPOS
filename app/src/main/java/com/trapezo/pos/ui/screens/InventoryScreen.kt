@@ -39,34 +39,79 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.trapezo.pos.AppGraph
-import com.trapezo.pos.data.entity.InventoryMovementEntity
+import com.trapezo.pos.data.dao.MovementWithProduct
 import com.trapezo.pos.data.entity.ProductEntity
 import com.trapezo.pos.utils.Dates
-import com.trapezo.pos.utils.Money
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InventoryScreen(userId: Long, canAdjust: Boolean) {
+    val pageSize = 50
+    val movementPageSize = 20
     val scope = rememberCoroutineScope()
     var filter by remember { mutableStateOf("ALL") }
     var query by remember { mutableStateOf("") }
     var products by remember { mutableStateOf(emptyList<ProductEntity>()) }
-    var movements by remember { mutableStateOf(emptyList<InventoryMovementEntity>()) }
+    var productPage by remember { mutableStateOf(0) }
+    var hasMoreProducts by remember { mutableStateOf(false) }
+    var movements by remember { mutableStateOf(emptyList<MovementWithProduct>()) }
+    var movementPage by remember { mutableStateOf(0) }
+    var hasMoreMovements by remember { mutableStateOf(false) }
+    var requestVersion by remember { mutableStateOf(0) }
     var adjustment by remember { mutableStateOf<ProductEntity?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
 
     fun refresh() {
+        val version = ++requestVersion
         scope.launch {
-            products = when (filter) {
-                "LOW" -> AppGraph.products.lowStock()
-                "OUT" -> AppGraph.products.outOfStock()
-                else -> AppGraph.products.page(query, null, false, "stock_asc", 0, 100).first.filter { !it.trackInventory || true }
-            }.filter { query.isBlank() || it.name.contains(query, true) || it.sku.contains(query, true) || it.barcode.contains(query, true) }
-            movements = AppGraph.db.inventoryDao().recent(20, 0)
+            val (loadedProducts, total) = AppGraph.products.filteredPage(query, null, "ACTIVE", true, filter, "stock_asc", 0, pageSize)
+            val loadedMovements = AppGraph.db.inventoryDao().recentWithProductName(movementPageSize, 0)
+            if (version != requestVersion) return@launch
+            products = loadedProducts.distinctBy { it.id }
+            productPage = 0
+            hasMoreProducts = products.size < total
+            movements = loadedMovements.distinctBy { it.id }
+            movementPage = 0
+            hasMoreMovements = loadedMovements.size == movementPageSize
         }
     }
-    LaunchedEffect(filter, query) { refresh() }
+    fun loadMoreProducts() {
+        val version = requestVersion
+        val nextPage = productPage + 1
+        scope.launch {
+            val (loaded, total) = AppGraph.products.filteredPage(query, null, "ACTIVE", true, filter, "stock_asc", nextPage, pageSize)
+            if (version != requestVersion) return@launch
+            products = (products + loaded).distinctBy { it.id }
+            productPage = nextPage
+            hasMoreProducts = products.size < total
+        }
+    }
+    fun loadMoreMovements() {
+        val version = requestVersion
+        val nextPage = movementPage + 1
+        scope.launch {
+            val loaded = AppGraph.db.inventoryDao().recentWithProductName(movementPageSize, nextPage * movementPageSize)
+            if (version != requestVersion) return@launch
+            movements = (movements + loaded).distinctBy { it.id }
+            movementPage = nextPage
+            hasMoreMovements = loaded.size == movementPageSize
+        }
+    }
+    LaunchedEffect(filter, query) {
+        val version = ++requestVersion
+        delay(300)
+        val (loadedProducts, total) = AppGraph.products.filteredPage(query, null, "ACTIVE", true, filter, "stock_asc", 0, pageSize)
+        val loadedMovements = AppGraph.db.inventoryDao().recentWithProductName(movementPageSize, 0)
+        if (version != requestVersion) return@LaunchedEffect
+        products = loadedProducts.distinctBy { it.id }
+        productPage = 0
+        hasMoreProducts = products.size < total
+        movements = loadedMovements.distinctBy { it.id }
+        movementPage = 0
+        hasMoreMovements = loadedMovements.size == movementPageSize
+    }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Inventory", fontWeight = FontWeight.Bold) }) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -98,17 +143,19 @@ fun InventoryScreen(userId: Long, canAdjust: Boolean) {
                         }
                     }
                 }
+                if (hasMoreProducts) item { TextButton(onClick = ::loadMoreProducts, modifier = Modifier.fillMaxWidth()) { Text("MUAT LEBIH BANYAK") } }
             }
             HorizontalDivider()
             Text("Pergerakan stok terbaru", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             LazyColumn(Modifier.weight(0.45f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 items(movements, key = { it.id }) { m ->
-                    val productName = products.firstOrNull { it.id == m.productId }?.name ?: "Produk #${m.productId}"
+                    val productName = m.productName ?: "Produk #${m.productId}"
                     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         Column(Modifier.weight(1f)) { Text("$productName • ${m.type}"); Text("${Dates.dmyhm(m.createdAt)}${if (m.note.isBlank()) "" else " • ${m.note}"}", style = MaterialTheme.typography.bodySmall) }
                         Text(if (m.quantity >= 0) "+${m.quantity}" else m.quantity.toString(), color = if (m.quantity >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                     }
                 }
+                if (hasMoreMovements) item { TextButton(onClick = ::loadMoreMovements, modifier = Modifier.fillMaxWidth()) { Text("MUAT RIWAYAT LEBIH BANYAK") } }
             }
         }
     }
@@ -142,15 +189,16 @@ private fun InventoryAdjustmentDialog(product: ProductEntity, userId: Long, onDi
                         Text(title)
                     }
                 }
-                OutlinedTextField(amount, { amount = it }, label = { Text(if (mode == "SET") "Stok baru" else "Jumlah") }, singleLine = true)
+                OutlinedTextField(amount, { value -> amount = value.filter(Char::isDigit) }, label = { Text(if (mode == "SET") "Stok baru" else "Jumlah") }, singleLine = true)
                 OutlinedTextField(reason, { reason = it }, label = { Text("Alasan wajib") })
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
             Button(onClick = {
-                val quantity = Money.parse(amount)
-                if (quantity <= 0 || reason.trim().isEmpty()) error = "Jumlah dan alasan wajib diisi"
+                val quantity = amount.toLongOrNull()
+                val invalidQuantity = quantity == null || (mode == "SET" && quantity < 0) || (mode != "SET" && quantity <= 0)
+                if (invalidQuantity || reason.trim().isEmpty()) error = if (mode == "SET") "Stok baru (nol atau lebih) dan alasan wajib diisi" else "Jumlah positif dan alasan wajib diisi"
                 else scope.launch {
                     if (AppGraph.products.adjustStock(product, mode, quantity, reason.trim(), userId)) onResult("Adjustment stok tersimpan")
                     else error = "Adjustment gagal; stok tidak mencukupi atau data invalid"

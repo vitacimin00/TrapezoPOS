@@ -58,6 +58,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun refundDao(): RefundDao
     abstract fun shiftDao(): ShiftDao
     abstract fun settingsDao(): SettingsDao
+    abstract fun paymentMethodDao(): com.trapezo.pos.data.dao.PaymentMethodDao
 
     companion object {
         const val NAME = "trapezo_pos.db"
