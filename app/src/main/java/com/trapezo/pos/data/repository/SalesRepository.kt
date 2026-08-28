@@ -11,56 +11,25 @@ import com.trapezo.pos.data.entity.SaleItemEntity
 import com.trapezo.pos.domain.model.CartLine
 import com.trapezo.pos.domain.model.OrderDiscount
 import com.trapezo.pos.domain.model.PaymentAllocation
+import com.trapezo.pos.domain.model.PricingEngine
 import com.trapezo.pos.domain.model.Totals
 import com.trapezo.pos.utils.Dates
+import java.util.Calendar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/**
- * Pure pricing logic for a cart.
- */
+/** Compatibility facade used by the current POS UI. */
 object PriceEngine {
-
     fun totals(
         lines: List<CartLine>,
         discount: OrderDiscount,
         taxPercent: Long,
         servicePercent: Long,
         roundingStep: Long
-    ): Totals {
-        val subtotal = lines.sumOf { it.subtotal }
-        val disc = discount.amountFor(subtotal)
-        val afterDisc = (subtotal - disc).coerceAtLeast(0)
-
-        // Service charge applies to lines not flagged exempt, proportional to their share
-        val svcBase = if (subtotal > 0 && servicePercent > 0)
-            afterDisc * lines.filter { !it.nonServiceChargeItem }.sumOf { it.subtotal } / subtotal * servicePercent.coerceIn(0, 100) / 100
-        else 0L
-
-        // Tax applies to non-exempt share of the discounted amount
-        val taxableShare = if (subtotal > 0)
-            lines.filter { !it.taxFreeItem }.sumOf { it.subtotal } * 100 / subtotal else 0L
-        val taxPart = if (taxPercent > 0 && afterDisc > 0)
-            afterDisc * taxableShare.coerceIn(0, 100) / 100 * taxPercent.coerceIn(0, 100) / 100
-        else 0L
-
-        var grand = afterDisc + svcBase + taxPart
-        if (roundingStep > 1) grand = ((grand + roundingStep / 2) / roundingStep) * roundingStep
-
-        return Totals(
-            subtotal = subtotal,
-            discount = disc,
-            tax = taxPart,
-            serviceCharge = svcBase,
-            grandTotal = grand.coerceAtLeast(0),
-            itemCount = lines.size
-        )
-    }
+    ): Totals = PricingEngine.price(lines, discount, taxPercent, servicePercent, roundingStep).totals
 }
 
-/**
- * Sales repository: history queries and the atomic checkout transaction.
- */
+/** Sales repository: history queries and the atomic checkout transaction. */
 class SalesRepository(
     private val db: com.trapezo.pos.data.database.AppDatabase,
     private val saleDao: SaleDao,
@@ -82,7 +51,8 @@ class SalesRepository(
     /**
      * Atomic checkout: validates stock, writes sale+items+payments, decrements stock,
      * updates shift cash counters and writes an audit row — all in ONE database transaction.
-     * If anything fails, nothing is written and stock stays untouched.
+     * Each sale item also stores its exact final net share after discount/tax/service/rounding,
+     * which is the only monetary base later used by refunds.
      */
     suspend fun checkout(
         lines: List<CartLine>,
@@ -96,15 +66,20 @@ class SalesRepository(
     ): CheckoutResult = withContext(Dispatchers.IO) {
         if (lines.isEmpty()) return@withContext CheckoutResult.Failure("Keranjang kosong")
         if (shiftId == null) return@withContext CheckoutResult.Failure("Buka shift terlebih dahulu sebelum melakukan transaksi")
+        if (lines.any { it.quantity <= 0 || it.unitPrice < 0 }) {
+            return@withContext CheckoutResult.Failure("Item transaksi memiliki quantity atau harga yang tidak valid")
+        }
 
         val taxPct = settings.taxPercent()
         val svcPct = settings.servicePercent()
         val round = settings.rounding()
-        val totals = PriceEngine.totals(lines, discount, taxPct, svcPct, round)
+        val pricing = PricingEngine.price(lines, discount, taxPct, svcPct, round)
+        val totals = pricing.totals
 
         val allocation = PaymentAllocation.settle(paidByMethod, totals.grandTotal)
-        if (allocation.shortfall > 0)
+        if (allocation.shortfall > 0) {
             return@withContext CheckoutResult.Failure("Total dibayar kurang dari tagihan")
+        }
 
         try {
             var savedSale: SaleEntity? = null
@@ -116,8 +91,9 @@ class SalesRepository(
                 for (line in lines) {
                     if (!line.trackInventory) continue
                     val stock = db.productDao().stockOf(line.productId) ?: continue
-                    if (stock < line.quantity)
+                    if (stock < line.quantity) {
                         throw StockException("${line.name}: stok tersisa $stock, diminta ${line.quantity}")
+                    }
                 }
 
                 // 2. verify the shift remains open and reserve a unique invoice number.
@@ -155,21 +131,33 @@ class SalesRepository(
                     transactionStatus = "COMPLETED",
                     createdAt = now
                 )
-                val items = lines.map {
+                val items = lines.mapIndexed { index, line ->
                     SaleItemEntity(
                         saleId = 0,
-                        productId = it.productId,
-                        productNameSnapshot = it.name,
-                        barcodeSnapshot = it.barcode ?: "",
-                        quantity = it.quantity,
-                        unitPrice = it.unitPrice,
-                        subtotal = it.subtotal,
+                        productId = line.productId,
+                        productNameSnapshot = line.name,
+                        barcodeSnapshot = line.barcode ?: "",
+                        quantity = line.quantity,
+                        unitPrice = line.unitPrice,
+                        discount = pricing.lineDiscounts[index],
+                        subtotal = line.subtotal,
+                        netTotal = pricing.lineNetTotals[index],
                         createdAt = now
                     )
                 }
+                check(items.sumOf { it.netTotal } == totals.grandTotal) {
+                    "Snapshot nilai item tidak sama dengan total transaksi"
+                }
+
                 // Persist only the revenue settled against this sale; cash tender/change remains on SaleEntity.
-                val pays = allocation.settled.map { (m, amount) ->
-                    PaymentEntity(saleId = 0, method = m, amount = amount, referenceNumber = references[m] ?: "", createdAt = now)
+                val pays = allocation.settled.map { (method, amount) ->
+                    PaymentEntity(
+                        saleId = 0,
+                        method = method,
+                        amount = amount,
+                        referenceNumber = references[method] ?: "",
+                        createdAt = now
+                    )
                 }
                 val saleId = saleDao.saveFullSale(sale, items, pays)
 
@@ -179,14 +167,18 @@ class SalesRepository(
                     db.productDao().applyDelta(line.productId, -line.quantity)
                     db.inventoryDao().insert(
                         InventoryMovementEntity(
-                            productId = line.productId, type = "SALE",
-                            quantity = -line.quantity, referenceId = saleId,
-                            note = invoiceNumber, userId = user.id, createdAt = now
+                            productId = line.productId,
+                            type = "SALE",
+                            quantity = -line.quantity,
+                            referenceId = saleId,
+                            note = invoiceNumber,
+                            userId = user.id,
+                            createdAt = now
                         )
                     )
                 }
 
-                // 4. shift counters use the actual sale revenue, not a cash tender that includes change.
+                // 4. shift counters use settled revenue, never cash tender that includes change.
                 val cashRevenue = allocation.settled["CASH"] ?: 0L
                 val nonCashRevenue = totals.grandTotal - cashRevenue
                 db.shiftDao().addSaleTotals(shiftId, cashRevenue, nonCashRevenue)
@@ -194,14 +186,17 @@ class SalesRepository(
                 // 5. audit log
                 db.settingsDao().insertAudit(
                     AuditLogEntity(
-                        userId = user.id, action = "SALE_CREATE", referenceType = "sale",
-                        referenceId = saleId, description = "$invoice total Rp ${totals.grandTotal}",
+                        userId = user.id,
+                        action = "SALE_CREATE",
+                        referenceType = "sale",
+                        referenceId = saleId,
+                        description = "$invoiceNumber total Rp ${totals.grandTotal}",
                         createdAt = now
                     )
                 )
 
                 savedSale = sale.copy(id = saleId)
-                savedItems = items.mapIndexed { i, e -> e.copy(saleId = saleId) }
+                savedItems = items.map { it.copy(saleId = saleId) }
                 savedInvoice = invoiceNumber
             }
 
@@ -229,13 +224,14 @@ class SalesRepository(
         f.toMs?.let { sb.append(" AND s.createdAt <= ?"); args.add(it) }
         f.cashierUserId?.let { sb.append(" AND s.userId = ?"); args.add(it) }
         f.status?.let { sb.append(" AND s.transactionStatus = ?"); args.add(it) }
-        f.queryInvoice?.takeIf { it.isNotBlank() }?.let { sb.append(" AND s.invoiceNumber LIKE '%'||?||'%'"); args.add(it.trim()) }
+        f.queryInvoice?.takeIf { it.isNotBlank() }?.let {
+            sb.append(" AND s.invoiceNumber LIKE '%'||?||'%'")
+            args.add(it.trim())
+        }
     }
 
     suspend fun history(f: HistoryFilters, page: Int, pageSize: Int = 40): Pair<List<SaleEntity>, Int> =
         withContext(Dispatchers.IO) {
-            // Use bind parameters even for payment method; raw SQL interpolation here
-            // would make a future caller able to alter the history query.
             val selSb = StringBuilder("SELECT DISTINCT s.* FROM sales s")
             val selArgs = mutableListOf<Any>()
             f.method?.let {
@@ -244,7 +240,8 @@ class SalesRepository(
             }
             buildWhere(f, selSb, selArgs)
             selSb.append(" ORDER BY s.createdAt DESC LIMIT ? OFFSET ?")
-            selArgs.add(pageSize); selArgs.add(page * pageSize)
+            selArgs.add(pageSize)
+            selArgs.add(page * pageSize)
 
             val cntSb = StringBuilder("SELECT COUNT(DISTINCT s.id) FROM sales s")
             val cntArgs = mutableListOf<Any>()
@@ -262,21 +259,37 @@ class SalesRepository(
 
     suspend fun saleWithDetails(saleId: Long): Triple<SaleEntity, List<SaleItemEntity>, List<PaymentEntity>>? =
         withContext(Dispatchers.IO) {
-            val s = saleDao.saleById(saleId) ?: return@withContext null
-            Triple(s, saleDao.itemsFor(saleId), saleDao.paymentsFor(saleId))
+            val sale = saleDao.saleById(saleId) ?: return@withContext null
+            Triple(sale, saleDao.itemsFor(saleId), saleDao.paymentsFor(saleId))
         }
 
     suspend fun findByInvoice(inv: String) = withContext(Dispatchers.IO) { saleDao.saleByInvoice(inv) }
 
     // ---- reports ----
     suspend fun dailySeries(days: Int): List<SaleDao.DailyTotalRow> = withContext(Dispatchers.IO) {
-        val to = Dates.endOfDay()
-        val from = Dates.startOfDay(System.currentTimeMillis() - (days - 1) * Dates.DAY_MS)
-        saleDao.dailyTotals(from, to, Dates.DAY_MS)
+        if (days <= 0) return@withContext emptyList()
+        val todayStart = Dates.startOfDay()
+        (days - 1 downTo 0).map { offset ->
+            val start = Calendar.getInstance().apply {
+                timeInMillis = todayStart
+                add(Calendar.DAY_OF_YEAR, -offset)
+            }.timeInMillis
+            val nextStart = Calendar.getInstance().apply {
+                timeInMillis = start
+                add(Calendar.DAY_OF_YEAR, 1)
+            }.timeInMillis
+            val row = saleDao.totalsBetween(start, nextStart - 1)
+            SaleDao.DailyTotalRow(dayStart = start, total = row.total, cnt = row.cnt)
+        }
     }
 
     suspend fun todayStats(): SaleDao.TotalRow = withContext(Dispatchers.IO) {
-        saleDao.totalsBetween(Dates.startOfDay(), Dates.endOfDay())
+        val start = Dates.startOfDay()
+        val nextStart = Calendar.getInstance().apply {
+            timeInMillis = start
+            add(Calendar.DAY_OF_YEAR, 1)
+        }.timeInMillis
+        saleDao.totalsBetween(start, nextStart - 1)
     }
 
     suspend fun rangeTotals(from: Long, to: Long) = withContext(Dispatchers.IO) { saleDao.totalsBetween(from, to) }

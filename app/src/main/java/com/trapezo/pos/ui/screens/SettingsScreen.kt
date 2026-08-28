@@ -48,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.trapezo.pos.AppGraph
@@ -302,19 +303,47 @@ fun SettingsScreen(user: UserEntity) {
     if (usersOpen) UsersDialog(actor = user, onDismiss = { usersOpen = false }, onMessage = { notice = it })
 }
 
-@Composable private fun SettingsNotice(message: String, dismiss: () -> Unit) = Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Text(message, Modifier.weight(1f)); TextButton(onClick = dismiss) { Text("Tutup") } } }
-@Composable private fun SectionHeading(label: String) = Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-@Composable private fun ToggleSetting(label: String, value: Boolean, set: (Boolean) -> Unit) = Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f)); Switch(checked = value, onCheckedChange = set) }
+@Composable
+private fun SettingsNotice(message: String, dismiss: () -> Unit) = Card(Modifier.fillMaxWidth()) {
+    Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(message, Modifier.weight(1f))
+        TextButton(onClick = dismiss) { Text("Tutup") }
+    }
+}
 
 @Composable
-private fun PrinterPickerDialog(printers: List<BluetoothPrinterService.PairedPrinter>, onDismiss: () -> Unit, onSelect: (BluetoothPrinterService.PairedPrinter) -> Unit) {
+private fun SectionHeading(label: String) = Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+@Composable
+private fun ToggleSetting(label: String, value: Boolean, set: (Boolean) -> Unit) =
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f))
+        Switch(checked = value, onCheckedChange = set)
+    }
+
+@Composable
+private fun PrinterPickerDialog(
+    printers: List<BluetoothPrinterService.PairedPrinter>,
+    onDismiss: () -> Unit,
+    onSelect: (BluetoothPrinterService.PairedPrinter) -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Pilih printer yang dipasangkan") },
         text = {
-            if (printers.isEmpty()) Text("Tidak ada printer Bluetooth yang dipasangkan. Pasangkan printer dari Pengaturan Android terlebih dahulu.")
-            else Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                printers.forEach { printer -> TextButton(onClick = { onSelect(printer) }, modifier = Modifier.fillMaxWidth()) { Column { Text(printer.name); Text(printer.address, style = MaterialTheme.typography.bodySmall) } } }
+            if (printers.isEmpty()) {
+                Text("Tidak ada printer Bluetooth yang dipasangkan. Pasangkan printer dari Pengaturan Android terlebih dahulu.")
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    printers.forEach { printer ->
+                        TextButton(onClick = { onSelect(printer) }, modifier = Modifier.fillMaxWidth()) {
+                            Column {
+                                Text(printer.name)
+                                Text(printer.address, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } }
@@ -349,7 +378,10 @@ private fun UsersDialog(actor: UserEntity, onDismiss: () -> Unit, onMessage: (St
                 LazyColumn(Modifier.height(230.dp)) {
                     items(users, key = { it.id }) { target ->
                         Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) { Text(target.name, fontWeight = FontWeight.SemiBold); Text("${target.username} • ${target.role} • ${if (target.isActive) "Aktif" else "Nonaktif"}", style = MaterialTheme.typography.bodySmall) }
+                            Column(Modifier.weight(1f)) {
+                                Text(target.name, fontWeight = FontWeight.SemiBold)
+                                Text("${target.username} • ${target.role} • ${if (target.isActive) "Aktif" else "Nonaktif"}", style = MaterialTheme.typography.bodySmall)
+                            }
                             IconButton(onClick = { edit = target }) { Icon(Icons.Default.Edit, "Edit user") }
                         }
                     }
@@ -358,8 +390,20 @@ private fun UsersDialog(actor: UserEntity, onDismiss: () -> Unit, onMessage: (St
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } }
     )
-    if (create) UserEditorDialog(existing = null, actor = actor, onDismiss = { create = false }, onSaved = { create = false; onMessage(it); refresh() })
-    edit?.let { target -> UserEditorDialog(existing = target, actor = actor, onDismiss = { edit = null }, onSaved = { edit = null; onMessage(it); refresh() }) }
+    if (create) UserEditorDialog(
+        existing = null,
+        actor = actor,
+        onDismiss = { create = false },
+        onSaved = { create = false; onMessage(it); refresh() }
+    )
+    edit?.let { target ->
+        UserEditorDialog(
+            existing = target,
+            actor = actor,
+            onDismiss = { edit = null },
+            onSaved = { edit = null; onMessage(it); refresh() }
+        )
+    }
 }
 
 @Composable
@@ -379,9 +423,18 @@ private fun UserEditorDialog(existing: UserEntity?, actor: UserEntity, onDismiss
                 OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(name, { name = it }, label = { Text("Nama") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("ADMIN" to "Admin", "CASHIER" to "Cashier").forEach { (id, label) -> FilterChip(selected = role == id, onClick = { role = id }, label = { Text(label) }) }
+                    listOf("ADMIN" to "Admin", "CASHIER" to "Cashier").forEach { (id, label) ->
+                        FilterChip(selected = role == id, onClick = { role = id }, label = { Text(label) })
+                    }
                 }
-                OutlinedTextField(password, { password = it }, label = { Text(if (existing == null) "Password (min. 6)" else "Password baru (kosong = tidak berubah)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text(if (existing == null) "Password (min. 8)" else "Password baru (min. 8; kosong = tidak berubah)") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
                 ToggleSetting("Akun aktif", active) { active = it }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
@@ -389,7 +442,15 @@ private fun UserEditorDialog(existing: UserEntity?, actor: UserEntity, onDismiss
         confirmButton = {
             Button(onClick = {
                 scope.launch {
-                    val result = AppGraph.users.save(existing, username, name, role, password.takeIf { it.isNotBlank() }, active, actor.id)
+                    val result = AppGraph.users.save(
+                        existing,
+                        username,
+                        name,
+                        role,
+                        password.takeIf { it.isNotBlank() },
+                        active,
+                        actor.id
+                    )
                     if (result.error != null) error = result.error else onSaved("User ${result.user!!.username} disimpan")
                 }
             }) { Text("SIMPAN") }

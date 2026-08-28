@@ -1,11 +1,15 @@
 package com.trapezo.pos.data.repository
 
+import androidx.room.withTransaction
 import com.trapezo.pos.data.dao.CustomerDao
+import com.trapezo.pos.data.database.AppDatabase
+import com.trapezo.pos.data.entity.AuditLogEntity
 import com.trapezo.pos.data.entity.CustomerEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class CustomerRepository(
+    private val db: AppDatabase,
     private val dao: CustomerDao,
     private val settings: SettingsRepository
 ) {
@@ -15,29 +19,87 @@ class CustomerRepository(
         Pair(dao.page(query.trim(), pageSize, page * pageSize), dao.count(query.trim()))
     }
 
-    suspend fun save(customer: CustomerEntity): SaveResult = withContext(Dispatchers.IO) {
+    /** Customer master-data edits are admin-only. Points/balance are ledger-owned and immutable here. */
+    suspend fun save(customer: CustomerEntity, actorId: Long): SaveResult = withContext(Dispatchers.IO) {
         if (customer.name.trim().isEmpty()) return@withContext SaveResult(error = "Nama customer wajib diisi")
-        var value = customer.copy(name = customer.name.trim(), phone = customer.phone.trim(), email = customer.email.trim(), address = customer.address.trim())
-        if (value.code.isBlank()) {
-            val seq = settings.long("customer.seq", 1)
-            value = value.copy(code = "CUS-%06d".format(seq))
-            settings.putLong("customer.seq", seq + 1)
+        try {
+            var saved: CustomerEntity? = null
+            db.withTransaction {
+                val actor = db.userDao().byId(actorId)
+                    ?: throw IllegalArgumentException("Akun admin tidak ditemukan")
+                if (!actor.isActive || actor.role != "ADMIN") {
+                    throw IllegalArgumentException("Hanya admin aktif yang dapat mengubah data customer")
+                }
+
+                val existing = if (customer.id == 0L) null else dao.byId(customer.id)
+                    ?: throw IllegalArgumentException("Customer tidak ditemukan")
+                var value = customer.copy(
+                    name = customer.name.trim(),
+                    phone = customer.phone.trim(),
+                    email = customer.email.trim(),
+                    address = customer.address.trim(),
+                    // Financial loyalty fields may only change through their own future ledgers.
+                    points = existing?.points ?: 0,
+                    balance = existing?.balance ?: 0
+                )
+                if (value.code.isBlank()) {
+                    val seq = settings.long("customer.seq", 1)
+                    value = value.copy(code = "CUS-%06d".format(seq))
+                    settings.putLong("customer.seq", seq + 1)
+                }
+                val same = dao.byCode(value.code)
+                if (same != null && same.id != value.id) {
+                    throw IllegalArgumentException("Kode customer sudah digunakan")
+                }
+
+                val now = System.currentTimeMillis()
+                saved = if (existing == null) {
+                    val newValue = value.copy(createdAt = now, updatedAt = now)
+                    newValue.copy(id = dao.insert(newValue))
+                } else {
+                    val updated = value.copy(createdAt = existing.createdAt, updatedAt = now)
+                    dao.update(updated)
+                    updated
+                }
+                db.settingsDao().insertAudit(
+                    AuditLogEntity(
+                        userId = actorId,
+                        action = if (existing == null) "CUSTOMER_CREATE" else "CUSTOMER_UPDATE",
+                        referenceType = "customer",
+                        referenceId = saved!!.id,
+                        description = saved!!.name,
+                        createdAt = now
+                    )
+                )
+            }
+            SaveResult(customer = saved)
+        } catch (e: Exception) {
+            SaveResult(error = e.message ?: "Gagal menyimpan customer")
         }
-        val same = dao.byCode(value.code)
-        if (same != null && same.id != value.id) return@withContext SaveResult(error = "Kode customer sudah digunakan")
-        val saved = if (value.id == 0L) {
-            val id = dao.insert(value)
-            value.copy(id = id)
-        } else {
-            val updated = value.copy(updatedAt = System.currentTimeMillis())
-            dao.update(updated); updated
-        }
-        settings.audit(null, if (customer.id == 0L) "CUSTOMER_CREATE" else "CUSTOMER_UPDATE", "customer", saved.id, saved.name)
-        SaveResult(customer = saved)
     }
 
-    suspend fun delete(customer: CustomerEntity) = withContext(Dispatchers.IO) {
-        dao.delete(customer.id)
-        settings.audit(null, "CUSTOMER_DELETE", "customer", customer.id, customer.name)
+    suspend fun delete(customer: CustomerEntity, actorId: Long): String? = withContext(Dispatchers.IO) {
+        try {
+            db.withTransaction {
+                val actor = db.userDao().byId(actorId)
+                    ?: throw IllegalArgumentException("Akun admin tidak ditemukan")
+                if (!actor.isActive || actor.role != "ADMIN") {
+                    throw IllegalArgumentException("Hanya admin aktif yang dapat menghapus customer")
+                }
+                dao.delete(customer.id)
+                db.settingsDao().insertAudit(
+                    AuditLogEntity(
+                        userId = actorId,
+                        action = "CUSTOMER_DELETE",
+                        referenceType = "customer",
+                        referenceId = customer.id,
+                        description = customer.name
+                    )
+                )
+            }
+            null
+        } catch (e: Exception) {
+            e.message ?: "Gagal menghapus customer"
+        }
     }
 }

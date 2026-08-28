@@ -1,10 +1,8 @@
 package com.trapezo.pos.ui
 
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,11 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Assessment
@@ -47,40 +41,37 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.trapezo.pos.AppGraph
-import com.trapezo.pos.ui.screens.ProductsScreen
-import com.trapezo.pos.ui.screens.PosScreen
-import com.trapezo.pos.ui.screens.TransactionsScreen
-import com.trapezo.pos.ui.screens.InventoryScreen
 import com.trapezo.pos.ui.screens.CustomersScreen
+import com.trapezo.pos.ui.screens.InventoryScreen
+import com.trapezo.pos.ui.screens.PosScreen
+import com.trapezo.pos.ui.screens.ProductsScreen
 import com.trapezo.pos.ui.screens.ReportsScreen
 import com.trapezo.pos.ui.screens.SettingsScreen
+import com.trapezo.pos.ui.screens.TransactionsScreen
 import com.trapezo.pos.utils.Money
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -100,36 +91,81 @@ enum class AppDestination(val label: String, val icon: ImageVector) {
 @Composable
 fun TrapezoRoot(vm: AppViewModel = viewModel()) {
     val session by vm.session.collectAsState()
-    if (session.user == null) LoginScreen(
-        loading = session.loading,
-        error = session.error,
-        onLogin = vm::login
-    ) else MainShell(user = session.user!!, onLogout = vm::logout)
+    when {
+        session.initializing -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Memuat Trapezo POS…") }
+        session.needsSetup -> OwnerSetupScreen(session.loading, session.error, vm::setupOwner)
+        session.user == null -> LoginScreen(session.loading, session.error, vm::login)
+        else -> MainShell(user = session.user!!, onLogout = vm::logout)
+    }
 }
 
 @Composable
-private fun LoginScreen(loading: Boolean, error: String?, onLogin: (String, String) -> Unit) {
-    var username by remember { mutableStateOf("admin") }
-    var password by remember { mutableStateOf("") }
+private fun AuthCard(content: @Composable ColumnScope.() -> Unit) {
     Box(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary).padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
         Card(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(), shape = RoundedCornerShape(28.dp)) {
-            Column(modifier = Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text("▱", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.primary)
-                Text("Trapezo POS", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text("Kasir modern, cepat, dan tetap offline.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(5.dp))
-                OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true,
-                    visualTransformation = if (password.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-                if (error != null) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                Button(onClick = { onLogin(username, password) }, enabled = !loading, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Text(if (loading) "Memeriksa…" else "MASUK", fontWeight = FontWeight.Bold)
+            Column(
+                modifier = Modifier.padding(28.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                content = content
+            )
+        }
+    }
+}
+
+@Composable
+private fun OwnerSetupScreen(
+    loading: Boolean,
+    error: String?,
+    onSetup: (String, String, String) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var localError by remember { mutableStateOf<String?>(null) }
+    AuthCard {
+        Text("▱", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.primary)
+        Text("Setup pemilik", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("Buat akun admin pertama untuk perangkat ini. Tidak ada password bawaan.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(name, { name = it }, label = { Text("Nama pemilik") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("Password (min. 8)") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(confirm, { confirm = it }, label = { Text("Ulangi password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        (localError ?: error)?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        Button(
+            onClick = {
+                localError = when {
+                    password != confirm -> "Konfirmasi password tidak sama"
+                    name.isBlank() -> "Nama pemilik wajib diisi"
+                    username.trim().length < 3 -> "Username minimal 3 karakter"
+                    password.length < 8 -> "Password minimal 8 karakter"
+                    else -> null
                 }
-                Text("Login pertama: admin / admin123", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+                if (localError == null) onSetup(username, name, password)
+            },
+            enabled = !loading,
+            modifier = Modifier.fillMaxWidth().height(52.dp)
+        ) { Text(if (loading) "Menyimpan…" else "BUAT AKUN PEMILIK", fontWeight = FontWeight.Bold) }
+    }
+}
+
+@Composable
+private fun LoginScreen(loading: Boolean, error: String?, onLogin: (String, String) -> Unit) {
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    AuthCard {
+        Text("▱", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.primary)
+        Text("Trapezo POS", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("Kasir modern, cepat, dan tetap offline.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(5.dp))
+        OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        Button(onClick = { onLogin(username, password) }, enabled = !loading, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+            Text(if (loading) "Memeriksa…" else "MASUK", fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -158,24 +194,24 @@ private fun MainShell(user: com.trapezo.pos.data.entity.UserEntity, onLogout: ()
                 }
                 HorizontalDivider()
                 AppDestination.entries
-                    .filter { it != AppDestination.REPORTS || user.role == "ADMIN" }
+                    .filter { destinationItem ->
+                        when (destinationItem) {
+                            AppDestination.REPORTS, AppDestination.SETTINGS -> user.role == "ADMIN"
+                            else -> true
+                        }
+                    }
                     .forEach { item ->
-                    NavigationDrawerItem(
-                        label = { Text(item.label) },
-                        selected = destination == item,
-                        onClick = {
-                            destination = item
-                            scope.launch { drawerState.close() }
-                        },
-                        icon = { Icon(item.icon, contentDescription = null) },
-                        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                    )
-                }
+                        NavigationDrawerItem(
+                            label = { Text(item.label) },
+                            selected = destination == item,
+                            onClick = { destination = item; scope.launch { drawerState.close() } },
+                            icon = { Icon(item.icon, contentDescription = null) },
+                            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+                        )
+                    }
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 NavigationDrawerItem(
-                    label = { Text("Keluar") },
-                    selected = false,
-                    onClick = onLogout,
+                    label = { Text("Keluar") }, selected = false, onClick = onLogout,
                     icon = { Icon(Icons.Default.Close, contentDescription = null) },
                     modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
                 )
@@ -191,22 +227,17 @@ private fun MainShell(user: com.trapezo.pos.data.entity.UserEntity, onLogout: ()
                             Text(destination.label, style = MaterialTheme.typography.labelSmall)
                         }
                     },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Buka menu")
-                        }
-                    },
+                    navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, contentDescription = "Buka menu") } },
                     actions = { TextButton(onClick = onLogout) { Text(user.name) } },
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                 )
             },
             bottomBar = {
-                // Elevated navigation bar with a clear divider so content visually
-                // "ends" above it instead of bleeding into the bar.
-                androidx.compose.foundation.layout.Column {
+                val rolePrimary = primary.filter { it != AppDestination.SETTINGS || user.role == "ADMIN" }
+                Column {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
-                        primary.forEach { item ->
+                        rolePrimary.forEach { item ->
                             NavigationBarItem(
                                 selected = destination == item,
                                 onClick = { destination = item },
@@ -219,7 +250,6 @@ private fun MainShell(user: com.trapezo.pos.data.entity.UserEntity, onLogout: ()
             }
         ) { pad ->
             Box(Modifier.fillMaxSize().padding(pad)) {
-                // Smooth fade between modules — keeps navigation feeling responsive, not jumpy.
                 Crossfade(targetState = destination, label = "screenFade") { current ->
                     when (current) {
                         AppDestination.DASHBOARD -> DashboardScreen()
@@ -227,9 +257,9 @@ private fun MainShell(user: com.trapezo.pos.data.entity.UserEntity, onLogout: ()
                         AppDestination.PRODUCTS -> ProductsScreen(user.id, user.role == "ADMIN")
                         AppDestination.INVENTORY -> InventoryScreen(user.id, user.role == "ADMIN")
                         AppDestination.TRANSACTIONS -> TransactionsScreen(user)
-                        AppDestination.CUSTOMERS -> CustomersScreen(user.role == "ADMIN" || user.role == "CASHIER")
+                        AppDestination.CUSTOMERS -> CustomersScreen(user)
                         AppDestination.REPORTS -> if (user.role == "ADMIN") ReportsScreen() else ReportsDenied()
-                        AppDestination.SETTINGS -> SettingsScreen(user)
+                        AppDestination.SETTINGS -> if (user.role == "ADMIN") SettingsScreen(user) else ReportsDenied()
                     }
                 }
             }
@@ -271,35 +301,27 @@ private fun DashboardScreen() {
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Ringkasan hari ini", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            MetricCard("Penjualan", Money.fmt(revenue), Modifier.weight(1f))
-            MetricCard("Transaksi", tx.toString(), Modifier.weight(1f))
+            MetricCard("Penjualan", Money.fmt(revenue), Modifier.weight(1f)); MetricCard("Transaksi", tx.toString(), Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            MetricCard("Tunai", Money.fmt(cash), Modifier.weight(1f))
-            MetricCard("Non-tunai", Money.fmt(nonCash), Modifier.weight(1f))
+            MetricCard("Tunai", Money.fmt(cash), Modifier.weight(1f)); MetricCard("Non-tunai", Money.fmt(nonCash), Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            MetricCard("Item terjual", items.toString(), Modifier.weight(1f))
-            MetricCard("Kasir aktif", activeCashier ?: "—", Modifier.weight(1f))
+            MetricCard("Item terjual", items.toString(), Modifier.weight(1f)); MetricCard("Kasir aktif", activeCashier ?: "—", Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            MetricCard("Stok rendah", low.toString(), Modifier.weight(1f))
-            MetricCard("Stok habis", empty.toString(), Modifier.weight(1f))
+            MetricCard("Stok rendah", low.toString(), Modifier.weight(1f)); MetricCard("Stok habis", empty.toString(), Modifier.weight(1f))
         }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("Shift kasir", fontWeight = FontWeight.SemiBold)
-                Text(
-                    if (activeShift) "Shift sedang aktif" else "Belum ada shift aktif",
-                    color = if (activeShift) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                )
+                Text(if (activeShift) "Shift sedang aktif" else "Belum ada shift aktif", color = if (activeShift) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
         }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("Penjualan & transaksi 7 hari", fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(10.dp))
-                SevenDayChart(weekly)
+                Spacer(Modifier.height(10.dp)); SevenDayChart(weekly)
             }
         }
     }
@@ -319,12 +341,7 @@ private fun SevenDayChart(rows: List<com.trapezo.pos.data.dao.SaleDao.DailyTotal
         values.forEachIndexed { index, value ->
             val h = if (value == 0L) 3f else (value.toFloat() / maxValue * (size.height - 26f)).coerceAtLeast(3f)
             val x = gap * (index * 2 + 1)
-            drawRoundRect(
-                color = barColor,
-                topLeft = Offset(x, size.height - 22f - h),
-                size = Size(barWidth, h),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(5f, 5f)
-            )
+            drawRoundRect(color = barColor, topLeft = Offset(x, size.height - 22f - h), size = Size(barWidth, h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(5f, 5f))
         }
     }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -338,18 +355,24 @@ private fun SevenDayChart(rows: List<com.trapezo.pos.data.dao.SaleDao.DailyTotal
     Text("Batang: omzet • angka bawah: transaksi", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-@Composable private fun MetricCard(title: String, value: String, modifier: Modifier = Modifier) {
+@Composable
+private fun MetricCard(title: String, value: String, modifier: Modifier = Modifier) {
     Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-        Column(Modifier.padding(16.dp)) { Text(title, color = MaterialTheme.colorScheme.onPrimaryContainer); Spacer(Modifier.height(8.dp)); Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer) }
+        Column(Modifier.padding(16.dp)) {
+            Text(title, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            Spacer(Modifier.height(8.dp))
+            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
     }
 }
 
-@Composable private fun ReportsDenied() {
+@Composable
+private fun ReportsDenied() {
     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Laporan hanya untuk ADMIN", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Text("Akun CASHIER dapat melihat riwayat transaksi di menu Transaksi.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                Text("Akses admin diperlukan", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Text("Akun kasir tidak memiliki izin untuk modul ini.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             }
         }
     }

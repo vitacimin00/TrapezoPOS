@@ -4,11 +4,12 @@ build/
 .gradle/
 .kotlin/
 
-# APK & binaries
+# APK & signing secrets
 *.apk
 *.aab
 *.keystore
 *.jks
+keystore.properties
 
 # IDE
 .idea/
