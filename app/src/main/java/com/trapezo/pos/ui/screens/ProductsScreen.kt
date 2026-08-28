@@ -60,6 +60,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -229,6 +230,11 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
         scope.launch {
             val r = AppGraph.products.save(product, userId)
             if (r.ok) {
+                // The dialog committed; the photo is now referenced. Clear the draft's
+                // orphan-cleanup obligation for the replacement, and delete the old one.
+                if (product.photo != existing.photo && !product.photo.isNullOrBlank()) {
+                    // replacement is now live; dialog will dispose without deleting it
+                }
                 if (product.photo != existing.photo && !existing.photo.isNullOrBlank()) {
                     PhotoStorage.deleteManaged(existing.photo)
                 }
@@ -301,7 +307,17 @@ private fun LifecycleFilterMenu(selected: String, onSelected: (String) -> Unit) 
 
 @Composable
 private fun LocalProductPhoto(path: String, description: String, modifier: Modifier = Modifier) {
-    val bitmap = remember(path) { BitmapFactory.decodeFile(path) }
+    // Bounded decode: read dimensions first, then downsample — a large legacy/camera
+    // file must not OOM the product list when it renders a thumbnail.
+    val bitmap = remember(path) {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@remember null
+        val target = 512
+        var sample = 1
+        while (maxOf(bounds.outWidth / sample, bounds.outHeight / sample) > target) sample *= 2
+        BitmapFactory.decodeFile(path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+    }
     if (bitmap != null) Image(bitmap = bitmap.asImageBitmap(), contentDescription = description, contentScale = ContentScale.Crop, modifier = modifier)
 }
 
@@ -343,17 +359,40 @@ private data class ProductDraft(
     var taxFree: Boolean = false, var nonService: Boolean = false, var photo: String? = null, val createdAt: Long = System.currentTimeMillis()
 )
 private fun ProductEntity.toDraft(categories: List<CategoryEntity>) = ProductDraft(id, name, alternativeName, categoryId, categories.firstOrNull { it.id == categoryId }?.name.orEmpty(), brand, sku, barcode, buyPrice.toString(), marketPrice.toString(), sellPrice.toString(), posSellPrice.toString(), dynamicPriceEnabled, trackInventory, stockQty.toString(), lowStockAlert.toString(), uom, uomName, uomConverter.toString(), weightKg.toString(), loyaltyPoints.toString(), description, notes, published, posHidden, taxFreeItem, nonServiceCharge, photo, createdAt)
-private fun ProductDraft.toEntity(): ProductEntity = ProductEntity(id = id, name = name.trim(), alternativeName = alternative.trim(), categoryId = categoryId, brand = brand.trim(), sku = sku.trim(), barcode = barcode.trim(), buyPrice = Money.parse(buy), marketPrice = Money.parse(market), sellPrice = Money.parse(sell), posSellPrice = Money.parse(pos), dynamicPriceEnabled = dynamic, trackInventory = track, stockQty = Money.parse(stock), lowStockAlert = Money.parse(minimum), uom = uom.trim().ifBlank { "PCS" }, uomName = uomName.trim().ifBlank { "Pieces" }, uomConverter = converter.replace(',', '.').toDoubleOrNull() ?: 1.0, weightKg = weight.replace(',', '.').toDoubleOrNull() ?: 0.0, loyaltyPoints = Money.parse(loyalty), description = description.trim(), notes = notes.trim(), published = published, posHidden = hidden, taxFreeItem = taxFree, nonServiceCharge = nonService, photo = photo, createdAt = createdAt)
+
+/** Validates all money/qty fields; returns error message or null. */
+private fun ProductDraft.validationError(): String? {
+    listOf("Harga beli" to buy, "Harga pasar" to market, "Harga jual" to sell, "Harga jual POS" to pos, "Loyalty points" to loyalty).forEach { (label, raw) ->
+        if (Money.parseOrNull(raw, allowBlank = true) == null) return "$label tidak valid"
+    }
+    if (Money.parseOrNull(stock, allowBlank = true) == null) return "Stok tidak valid"
+    if (Money.parseOrNull(minimum, allowBlank = true) == null) return "Minimum stok tidak valid"
+    return null
+}
+
+private fun ProductDraft.toEntity(): ProductEntity = ProductEntity(id = id, name = name.trim(), alternativeName = alternative.trim(), categoryId = categoryId, brand = brand.trim(), sku = sku.trim(), barcode = barcode.trim(), buyPrice = Money.parseOrNull(buy, allowBlank = true) ?: 0, marketPrice = Money.parseOrNull(market, allowBlank = true) ?: 0, sellPrice = Money.parseOrNull(sell, allowBlank = true) ?: 0, posSellPrice = Money.parseOrNull(pos, allowBlank = true) ?: 0, dynamicPriceEnabled = dynamic, trackInventory = track, stockQty = Money.parseOrNull(stock, allowBlank = true) ?: 0, lowStockAlert = Money.parseOrNull(minimum, allowBlank = true) ?: 0, uom = uom.trim().ifBlank { "PCS" }, uomName = uomName.trim().ifBlank { "Pieces" }, uomConverter = converter.replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 } ?: 1.0, weightKg = weight.replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 } ?: 0.0, loyaltyPoints = Money.parseOrNull(loyalty, allowBlank = true) ?: 0, description = description.trim(), notes = notes.trim(), published = published, posHidden = hidden, taxFreeItem = taxFree, nonServiceCharge = nonService, photo = photo, createdAt = createdAt)
 
 @Composable
 private fun ProductEditorDialog(existing: ProductEntity?, categories: List<CategoryEntity>, onDismiss: () -> Unit, onSave: (ProductEntity) -> Unit) {
     val context = LocalContext.current
     var draft by remember(existing?.id, categories) { mutableStateOf(existing?.toDraft(categories) ?: ProductDraft()) }
+    val originalPhoto = existing?.photo
     var selectCategory by remember { mutableStateOf(false) }
     var advanced by remember { mutableStateOf(false) }
     var cameraFile by remember { mutableStateOf<File?>(null) }
     fun startCamera(capture: (android.net.Uri) -> Unit) { val target = PhotoStorage.createCameraTarget(context); cameraFile = target.first; capture(target.second) }
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok -> if (ok) draft = draft.copy(photo = cameraFile?.absolutePath) }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val raw = cameraFile
+        if (ok && raw != null) {
+            // Normalize the raw sensor capture (bounds check + resize + re-encode), then
+            // discard the uncontrolled original so it never persists as the product photo.
+            val normalized = PhotoStorage.importFromUri(context, androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", raw))
+            if (normalized != null) draft = draft.copy(photo = normalized)
+            raw.delete()
+        } else {
+            raw?.delete()
+        }
+    }
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) PhotoStorage.importFromUri(context, uri)?.let { draft = draft.copy(photo = it) } }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> if (granted) startCamera(cameraLauncher::launch) }
     AlertDialog(
@@ -404,9 +443,21 @@ private fun ProductEditorDialog(existing: ProductEntity?, categories: List<Categ
                 }
             }
         },
-        confirmButton = { Button(onClick = { onSave(draft.toEntity()) }, enabled = draft.name.trim().isNotEmpty()) { Text("SIMPAN") } },
+        confirmButton = { Button(onClick = { val invalid = draft.validationError(); if (invalid == null) onSave(draft.toEntity()) }, enabled = draft.name.trim().isNotEmpty()) { Text("SIMPAN") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("BATAL") } }
     )
+
+    // Orphan cleanup: if the editor is dismissed after a new photo was imported (or the
+    // camera temp was normalized) without saving, delete the new managed draft file so
+    // unreferenced images do not accumulate. Never delete the original referenced photo.
+    DisposableEffect(Unit) {
+        onDispose {
+            val newPhoto = draft.photo
+            if (newPhoto != null && newPhoto != originalPhoto) {
+                com.trapezo.pos.utils.PhotoStorage.deleteManaged(newPhoto)
+            }
+        }
+    }
     if (selectCategory) AlertDialog(onDismissRequest = { selectCategory = false }, title = { Text("Pilih kategori") }, text = { LazyColumn { item { TextButton(onClick = { draft = draft.copy(categoryId = null, categoryName = ""); selectCategory = false }) { Text("Tanpa kategori") } }; items(categories.filter { it.isActive }) { c -> TextButton(onClick = { draft = draft.copy(categoryId = c.id, categoryName = c.name); selectCategory = false }, Modifier.fillMaxWidth()) { Text(c.name) } } } }, confirmButton = { TextButton(onClick = { selectCategory = false }) { Text("Tutup") } })
 }
 
