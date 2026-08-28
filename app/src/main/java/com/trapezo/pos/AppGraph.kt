@@ -21,9 +21,9 @@ object AppGraph {
     val settings: SettingsRepository get() = SettingsRepository(db.settingsDao())
     val products: ProductRepository get() = ProductRepository(db, db.productDao(), db.categoryDao(), db.inventoryDao(), settings)
     val sales: SalesRepository get() = SalesRepository(db, db.saleDao(), settings)
-    val customers: CustomerRepository get() = CustomerRepository(db.customerDao(), settings)
+    val customers: CustomerRepository get() = CustomerRepository(db, db.customerDao(), settings)
     val refunds: RefundRepository get() = RefundRepository(db)
     val shifts: ShiftRepository get() = ShiftRepository(db)
     val store: StoreRepository get() = StoreRepository(db.storeDao())
-    val users: UserRepository get() = UserRepository(db.userDao(), settings)
+    val users: UserRepository get() = UserRepository(db, db.userDao(), settings)
 }

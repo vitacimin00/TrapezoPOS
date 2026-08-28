@@ -1,5 +1,6 @@
 package com.trapezo.pos.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -12,6 +13,8 @@ data class UserEntity(
     val name: String,
     val role: String, // ADMIN | CASHIER
     val isActive: Boolean = true,
+    @ColumnInfo(defaultValue = "0") val failedLoginCount: Int = 0,
+    @ColumnInfo(defaultValue = "0") val lockedUntil: Long = 0,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -23,7 +26,7 @@ data class StoreEntity(
     val address: String = "",
     val phone: String = "",
     val email: String = "",
-    val logo: String? = null, // file path
+    val logo: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

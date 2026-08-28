@@ -24,6 +24,18 @@ interface UserDao {
     @Query("SELECT * FROM users ORDER BY role DESC, name ASC")
     suspend fun all(): List<UserEntity>
 
+    @Query("SELECT COUNT(*) FROM users")
+    suspend fun count(): Int
+
+    @Query("SELECT COUNT(*) FROM users WHERE role='ADMIN' AND isActive=1")
+    suspend fun countActiveAdmins(): Int
+
     @Query("UPDATE users SET isActive = :active, updatedAt = :now WHERE id = :id")
     suspend fun setActive(id: Long, active: Boolean, now: Long = System.currentTimeMillis())
+
+    @Query("UPDATE users SET failedLoginCount=:count, lockedUntil=:lockedUntil, updatedAt=:now WHERE id=:id")
+    suspend fun recordFailedLogin(id: Long, count: Int, lockedUntil: Long, now: Long = System.currentTimeMillis())
+
+    @Query("UPDATE users SET failedLoginCount=0, lockedUntil=0, updatedAt=:now WHERE id=:id")
+    suspend fun clearLoginFailures(id: Long, now: Long = System.currentTimeMillis())
 }
