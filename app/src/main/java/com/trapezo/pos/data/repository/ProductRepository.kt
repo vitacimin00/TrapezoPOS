@@ -37,7 +37,7 @@ class ProductRepository(
         )
     }
 
-    suspend fun posSearch(q: String, limit: Int = 60, offset: Int = 0): List<ProductEntity> =
+    suspend fun posSearch(q: String, limit: Int = 20, offset: Int = 0): List<ProductEntity> =
         withContext(Dispatchers.IO) { productDao.posSearch(q.trim(), limit, offset) }
 
     suspend fun byId(id: Long): ProductEntity? = withContext(Dispatchers.IO) { productDao.byId(id) }
@@ -145,10 +145,31 @@ class ProductRepository(
         }
     }
 
-    suspend fun softDelete(p: ProductEntity) = withContext(Dispatchers.IO) {
-        db.withTransaction {
-            productDao.softDelete(p.id)
-            settings.audit(null, "PRODUCT_DEACTIVATE", "product", p.id, "Nonaktifkan produk ${p.name}")
+    data class LifecycleResult(val ok: Boolean, val error: String? = null)
+
+    suspend fun setActive(productId: Long, active: Boolean, userId: Long?): LifecycleResult = withContext(Dispatchers.IO) {
+        try {
+            db.withTransaction {
+                if (userId != null) {
+                    val actor = db.userDao().byId(userId) ?: throw Validation("Akun tidak ditemukan")
+                    if (!actor.isActive || actor.role != "ADMIN") throw Validation("Perubahan status produk hanya untuk admin")
+                }
+                val current = productDao.byId(productId) ?: throw Validation("Produk tidak ditemukan")
+                if (current.isActive != active) {
+                    val now = System.currentTimeMillis()
+                    if (productDao.setActive(productId, active, now) != 1) throw Validation("Status produk gagal diperbarui")
+                    settings.audit(
+                        userId,
+                        if (active) "PRODUCT_ACTIVATE" else "PRODUCT_DEACTIVATE",
+                        "product",
+                        productId,
+                        if (active) "Aktifkan produk ${current.name}" else "Nonaktifkan produk ${current.name}"
+                    )
+                }
+            }
+            LifecycleResult(true)
+        } catch (e: Exception) {
+            LifecycleResult(false, e.message ?: "Gagal mengubah status produk")
         }
     }
 

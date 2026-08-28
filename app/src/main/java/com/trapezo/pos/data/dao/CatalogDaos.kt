@@ -22,7 +22,7 @@ interface ProductDao {
     suspend fun update(p: ProductEntity)
 
     @Query("UPDATE products SET isActive=:active, updatedAt=:now WHERE id=:id")
-    suspend fun setActive(id: Long, active: Boolean, now: Long = System.currentTimeMillis())
+    suspend fun setActive(id: Long, active: Boolean, now: Long = System.currentTimeMillis()): Int
 
     /** Soft delete: mark inactive. Hard delete left to maintenance. */
     @Query("UPDATE products SET isActive=0, updatedAt=:now WHERE id=:id")

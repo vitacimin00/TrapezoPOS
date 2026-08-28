@@ -89,6 +89,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PosScreen(user: UserEntity) {
+    val posSearchLimit = 20
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     var shift by remember { mutableStateOf<ShiftEntity?>(null) }
@@ -158,7 +159,7 @@ fun PosScreen(user: UserEntity) {
     LaunchedEffect(search) {
         delay(300)
         val requested = search
-        val result = AppGraph.products.posSearch(requested, limit = 60)
+        val result = AppGraph.products.posSearch(requested, limit = posSearchLimit)
         if (search == requested) found = result
     }
 
@@ -216,7 +217,7 @@ fun PosScreen(user: UserEntity) {
                     }
                 }
             }
-            ProductCandidates(found, onAdd = ::addProduct)
+            ProductCandidates(found, posSearchLimit, onAdd = ::addProduct)
             HorizontalDivider()
             CartSection(cart = cart, totals = totals, discount = discount, onQuantity = { target -> quantityTarget = target }, onRemove = { id -> cart = CartEngine.remove(cart, id).lines }, onDiscount = { discountOpen = true }, onPay = { paymentOpen = true }, payEnabled = cart.isNotEmpty() && shift != null)
         }
@@ -282,15 +283,22 @@ private data class ReceiptPayload(val sale: SaleEntity, val items: List<SaleItem
 @Composable private fun ShiftStatusCard(shift: ShiftEntity, onCashIn: () -> Unit, onCashOut: () -> Unit) = Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Shift aktif • ${shift.userNameSnapshot}", fontWeight = FontWeight.Bold); Text("Modal awal ${Money.fmt(shift.openingCash)} • Kas seharusnya ${Money.fmt(shift.expectedCash)}", style = MaterialTheme.typography.bodySmall) }; TextButton(onClick = onCashIn) { Text("Cash In") }; TextButton(onClick = onCashOut) { Text("Cash Out") } } }
 
 @Composable
-private fun ProductCandidates(products: List<com.trapezo.pos.data.entity.ProductEntity>, onAdd: (com.trapezo.pos.data.entity.ProductEntity) -> Unit) {
+private fun ProductCandidates(products: List<com.trapezo.pos.data.entity.ProductEntity>, limit: Int, onAdd: (com.trapezo.pos.data.entity.ProductEntity) -> Unit) {
     if (products.isEmpty()) return
     LazyColumn(Modifier.height(140.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        items(products.take(20), key = { it.id }) { p ->
+        items(products, key = { it.id }) { p ->
             Card(Modifier.fillMaxWidth().clickable { onAdd(p) }) { Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) { Text(p.name, fontWeight = FontWeight.SemiBold); Text("${p.sku.ifBlank { p.barcode.ifBlank { "Tanpa SKU" } }} • Stok ${p.stockQty}", style = MaterialTheme.typography.bodySmall) }
                 Text(Money.fmt(p.posSellPrice.takeIf { it > 0 } ?: p.sellPrice), color = MaterialTheme.colorScheme.primary)
                 Icon(Icons.Default.Add, "Tambah", Modifier.padding(start = 8.dp))
             } }
+        }
+        if (products.size == limit) item {
+            Text(
+                "Menampilkan $limit hasil. Persempit pencarian untuk hasil yang lebih spesifik.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

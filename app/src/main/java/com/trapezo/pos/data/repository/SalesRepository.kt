@@ -91,6 +91,14 @@ class SalesRepository(
             var savedInvoice = ""
 
             db.withTransaction {
+                // Active payment methods are revalidated atomically at checkout.
+                for ((method, amount) in paidByMethod) {
+                    if (amount <= 0L) continue
+                    val configured = db.paymentMethodDao().byType(method)
+                    if (configured == null || !configured.isActive) {
+                        throw IllegalArgumentException("Metode pembayaran $method tidak aktif atau tidak dikenal")
+                    }
+                }
                 // 1. validate stock inside the write lock
                 for (line in lines) {
                     if (!line.trackInventory) continue
