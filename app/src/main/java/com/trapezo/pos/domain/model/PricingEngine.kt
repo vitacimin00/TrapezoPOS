@@ -1,5 +1,6 @@
 package com.trapezo.pos.domain.model
 
+import com.trapezo.pos.utils.toLongExactCompat
 import java.math.BigInteger
 
 data class PricingBreakdown(
@@ -15,7 +16,7 @@ object PricingEngine {
         return BigInteger.valueOf(base)
             .multiply(BigInteger.valueOf(percent.coerceIn(0, 100)))
             .divide(BigInteger.valueOf(100))
-            .longValueExact()
+            .toLongExactCompat()
     }
 
     fun price(

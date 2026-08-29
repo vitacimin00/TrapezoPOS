@@ -47,6 +47,8 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 
 /** Full-screen camera scanner. It returns one decoded barcode then the caller closes it. */
+// ImageProxy.getImage() is CameraX opt-in API; the analyzer hands the frame to ML Kit via
+// inputImageFrom() and always closes the proxy exactly once.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
@@ -76,15 +78,19 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
             // "COBA LAGI" never reuses a scanner that was already closed.
             val scanner = BarcodeScanning.getClient()
             val providerFuture = ProcessCameraProvider.getInstance(context)
+            // Hold the resolved provider and the analysis use case so teardown never has to
+            // re-resolve the future (blocking .get() during disposal can return/observe null
+            // internals and is not safe on the main thread).
+            var boundProvider: ProcessCameraProvider? = null
+            var boundAnalysis: ImageAnalysis? = null
             val listener = Runnable {
                 try {
                     val provider = providerFuture.get()
                     val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
                     val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                     analysis.setAnalyzer(mainExecutor) { imageProxy ->
-                        val image = imageProxy.image
-                        if (image == null) { imageProxy.close(); return@setAnalyzer }
-                        val input = InputImage.fromMediaImage(image, imageProxy.imageInfo.rotationDegrees)
+                        val input = inputImageFrom(imageProxy)
+                        if (input == null) { imageProxy.close(); return@setAnalyzer }
                         scanner.process(input)
                             .addOnSuccessListener { codes ->
                                 val raw = codes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue
@@ -97,6 +103,8 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
                     }
                     provider.unbindAll()
                     provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                    boundProvider = provider
+                    boundAnalysis = analysis
                 } catch (e: Exception) {
                     // Recoverable error state instead of a silent black screen.
                     bindError = "Kamera tidak tersedia: ${e.message ?: "gagal membuka kamera"}"
@@ -104,8 +112,10 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
             }
             providerFuture.addListener(listener, mainExecutor)
             onDispose {
-                try { providerFuture.get().unbindAll() } catch (_: Exception) { }
-                scanner.close()
+                // Detach the analyzer first so no in-flight frame reaches a closed scanner.
+                try { boundAnalysis?.clearAnalyzer() } catch (_: Exception) { }
+                try { boundProvider?.unbindAll() } catch (_: Exception) { }
+                try { scanner.close() } catch (_: Exception) { }
             }
         }
 
@@ -129,4 +139,16 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * Wraps the CameraX opt-in `ImageProxy.getImage()` access in one named, annotated function.
+ *
+ * Returns null when the frame carries no media image; the caller closes the proxy in every path
+ * so a frame is never leaked.
+ */
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
+private fun inputImageFrom(imageProxy: androidx.camera.core.ImageProxy): InputImage? {
+    val image = imageProxy.image ?: return null
+    return InputImage.fromMediaImage(image, imageProxy.imageInfo.rotationDegrees)
 }
