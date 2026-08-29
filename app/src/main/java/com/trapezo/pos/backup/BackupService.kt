@@ -223,17 +223,43 @@ class BackupService(private val context: Context) {
         val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
         val wal = File(parent, "${AppDatabase.NAME}-wal")
         val shm = File(parent, "${AppDatabase.NAME}-shm")
+
+        // Same data-safety standard as the package path: an ownership ledger decides what
+        // rollback is allowed to touch, and an incomplete recovery is reported honestly.
+        val state = ApplyState(live, previous)
+
         AppDatabase.closeAndClear()
-        if (previous.exists()) previous.delete()
-        if (live.exists() && !live.renameTo(previous)) {
-            return BackupResult(false, "Gagal mengamankan database lama")
+        try {
+            if (previous.exists() && !previous.delete()) {
+                throw IllegalStateException("Gagal membersihkan cadangan database sebelumnya")
+            }
+            if (live.exists()) {
+                if (!live.renameTo(previous)) throw IllegalStateException("Gagal mengamankan database lama")
+                state.dbBackedUp = true
+            }
+            wal.delete(); shm.delete()
+
+            if (!staged.renameTo(live)) throw IllegalStateException("Gagal menerapkan database restore")
+            state.newDbApplied = true
+
+            previous.delete()
+            return BackupResult(
+                true,
+                "Backup database lama berhasil dipulihkan. Foto/logo dari backup lama hanya " +
+                    "tersedia jika file medianya masih ada di perangkat."
+            )
+        } catch (e: Exception) {
+            val unrecovered = state.rollback()
+            return if (unrecovered.isEmpty()) {
+                BackupResult(false, "Restore gagal dan data lama dikembalikan: ${e.message}")
+            } else {
+                BackupResult(
+                    false,
+                    "Restore gagal dan pemulihan data lama tidak selesai. Jangan gunakan aplikasi " +
+                        "sampai data diperiksa. (${unrecovered.joinToString("; ")})"
+                )
+            }
         }
-        wal.delete(); shm.delete()
-        if (!staged.renameTo(live)) {
-            if (previous.exists()) previous.renameTo(live)
-            return BackupResult(false, "Gagal menerapkan database restore")
-        }
-        return BackupResult(true, "Backup database lama berhasil dipulihkan. Foto/logo dari backup lama hanya tersedia jika file medianya masih ada di perangkat.")
     }
 
     /** Package restore: unpack, validate, rebind media paths, then atomically apply. */
@@ -336,19 +362,22 @@ class BackupService(private val context: Context) {
     }
 
     /**
-     * Ownership ledger for the restore apply phase.
+     * Ownership ledger for the restore apply phase, shared by the package and legacy raw-`.db`
+     * paths.
      *
      * Invariant: never delete anything unless we know it is the staged-new copy, or we hold a
      * verified previous copy available to restore. A resource whose "secure the original" move
      * never succeeded is still the original and is left strictly untouched.
+     *
+     * The legacy path replaces only the database, so the media arguments are optional.
      */
     private class ApplyState(
         private val live: File,
         private val previous: File,
-        private val photoDir: File,
-        private val photoPre: File,
-        private val logoDir: File,
-        private val logoPre: File
+        private val photoDir: File? = null,
+        private val photoPre: File? = null,
+        private val logoDir: File? = null,
+        private val logoPre: File? = null
     ) {
         /** True only when the ORIGINAL db was successfully moved aside to [previous]. */
         var dbBackedUp = false
@@ -379,22 +408,26 @@ class BackupService(private val context: Context) {
             // !dbBackedUp && !newDbApplied -> `live` was never moved: it IS the original. Leave it.
 
             // ---- product photos ----
-            if (newPhotosApplied && photoDir.exists() && !photoDir.deleteRecursively()) {
-                failed += "foto produk hasil restore tidak dapat dihapus"
-            }
-            if (photoBackedUp) {
-                if (photoDir.exists() || !photoPre.renameTo(photoDir)) {
-                    failed += "foto produk lama tidak dapat dikembalikan"
+            if (photoDir != null && photoPre != null) {
+                if (newPhotosApplied && photoDir.exists() && !photoDir.deleteRecursively()) {
+                    failed += "foto produk hasil restore tidak dapat dihapus"
+                }
+                if (photoBackedUp) {
+                    if (photoDir.exists() || !photoPre.renameTo(photoDir)) {
+                        failed += "foto produk lama tidak dapat dikembalikan"
+                    }
                 }
             }
 
             // ---- store media ----
-            if (newLogosApplied && logoDir.exists() && !logoDir.deleteRecursively()) {
-                failed += "logo toko hasil restore tidak dapat dihapus"
-            }
-            if (logoBackedUp) {
-                if (logoDir.exists() || !logoPre.renameTo(logoDir)) {
-                    failed += "logo toko lama tidak dapat dikembalikan"
+            if (logoDir != null && logoPre != null) {
+                if (newLogosApplied && logoDir.exists() && !logoDir.deleteRecursively()) {
+                    failed += "logo toko hasil restore tidak dapat dihapus"
+                }
+                if (logoBackedUp) {
+                    if (logoDir.exists() || !logoPre.renameTo(logoDir)) {
+                        failed += "logo toko lama tidak dapat dikembalikan"
+                    }
                 }
             }
 
