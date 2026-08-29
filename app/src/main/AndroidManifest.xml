@@ -1,12 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-feature
         android:name="android.hardware.camera.any"
         android:required="false" />
 
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!--
+      Trapezo POS is offline-first and performs NO network I/O: there is no HTTP client, no
+      sync service implementation, and no remote endpoint anywhere in the source.
+
+      ML Kit barcode scanning transitively pulls in
+      com.google.android.datatransport:transport-backend-cct, which declares INTERNET and
+      ACCESS_NETWORK_STATE for optional Google telemetry. Those permissions are removed from the
+      merged manifest so the shipped app genuinely cannot reach the network. Barcode scanning
+      itself uses the on-device bundled model and is verified to work without them.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
@@ -18,6 +31,8 @@
     <application
         android:name=".TrapezoApp"
         android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
