@@ -17,9 +17,11 @@ Baseline core terbaru menambahkan hardening sebelum pekerjaan UI lanjutan:
 - minimal satu admin aktif selalu dipertahankan;
 - hanya satu shift boleh berstatus `OPEN`, ditegakkan oleh transaksi repository dan constraint database;
 - create/edit produk, SKU sequence, initial stock, stock adjustment, dan cash movement diproses secara transactional;
-- signing secret tidak disimpan di repository;
-- Android platform backup dinonaktifkan untuk database POS lokal;
-- GitHub Actions menjalankan unit test dan debug build.
+- signing secret tidak disimpan di repository, dan packaging release gagal tertutup tanpa keystore produksi;
+- Android platform backup dan transfer device-to-device dinonaktifkan untuk data POS lokal;
+- backup portabel memakai paket `.trpz` berisi database + foto produk + logo toko;
+- release build memakai R8 dan resource shrinking;
+- GitHub Actions menjalankan unit test, debug build, build instrumentation, lint release, dan build release minified.
 
 ## Setup pertama
 
@@ -35,9 +37,25 @@ File `keystore.properties` dan file keystore tidak boleh di-commit. Salin templa
 keystore.properties.example -> keystore.properties
 ```
 
-Isi kredensial signing yang sebenarnya hanya di mesin build. Release signing hanya diaktifkan bila konfigurasi lokal lengkap.
+Isi kredensial signing yang sebenarnya hanya di mesin build.
 
-> Kredensial signing yang pernah tersimpan di history repository harus dianggap terekspos. Rotasi password/keystore sebelum release produksi berikutnya.
+**Release packaging fail closed.** Task `assembleRelease`, `bundleRelease`, dan `packageRelease`
+akan GAGAL bila `keystore.properties` tidak lengkap, masih berisi `CHANGE_ME`, atau file keystore
+tidak ada, dengan pesan:
+
+```text
+Production release signing belum dikonfigurasi. Isi keystore.properties dengan keystore produksi sebelum membuat APK/AAB release.
+```
+
+Task analisis release yang tidak menghasilkan artefak (`lintRelease`, `testReleaseUnitTest`) tetap
+bisa dijalankan tanpa secret produksi.
+
+> Kredensial signing yang pernah tersimpan di history repository harus dianggap terekspos.
+> **Jangan pakai ulang kredensial lama itu.** Rotasi keystore/password sebelum release produksi.
+
+CI hanya memakai keystore **ephemeral** yang dibuat `keytool` di runner untuk membuktikan jalur
+R8/signing bisa dipaketkan; keystore produksi tidak pernah dibuat atau disimpan di CI, dan APK/AAB
+hasil CI tidak diunggah sebagai artefak produksi.
 
 ## Data awal
 
@@ -98,28 +116,92 @@ Semantik sebagian kolom workbook lanjutan masih masuk scope hardening berikutnya
 
 ## Backup / Restore
 
-- Backup memakai Storage Access Framework dan checkpoint WAL sebelum database disalin.
-- Restore memakai staging dan cadangan `.pre_restore` sebelum mengganti database aktif.
-- Android platform backup dinonaktifkan, sehingga data POS tidak ikut backup Android generik.
+Format backup normal sekarang adalah **paket `.trpz`** (kontainer ZIP versioned, dibuat dengan
+standard library saja):
 
-Enkripsi backup dan validasi schema restore yang lebih ketat masih termasuk hardening lanjutan.
+```text
+manifest.properties          format=TRAPEZO_POS_BACKUP, formatVersion=1, schemaVersion=5, createdAt
+database/trapezo_pos.db      database Room (WAL di-checkpoint sebelum disalin)
+media/product_photos/<file>  foto produk yang direferensikan database
+media/store_media/<file>     logo toko yang direferensikan database
+```
+
+- Paket membawa database **beserta** foto produk dan logo toko yang direferensikan, sehingga
+  restore tidak lagi kehilangan media.
+- Backup/restore memakai Storage Access Framework.
+- Restore mendeteksi format dari **isi file**, bukan ekstensi: paket `.trpz` maupun backup lama
+  berupa file SQLite mentah (`.db`) tetap bisa dipulihkan.
+- Backup historis dengan schema v1/v2 diterima dan dimigrasikan ke v5.
+- Restore melakukan staging + validasi (magic SQLite, `user_version`, `application_id`,
+  `quick_check`, tabel inti sesuai versi schema) sebelum menyentuh data aktif.
+- Path media di database ditulis ulang ke direktori milik instalasi saat ini.
+- Arsip ditolak bila mengandung path traversal, entri absolut, entri duplikat, entri tak dikenal,
+  manifest hilang, `formatVersion` tak didukung, atau melewati batas ukuran/dekompresi.
+- Kegagalan restore memakai rollback berbasis kepemilikan: resource yang belum berhasil
+  dipindahkan tidak pernah dihapus, dan pemulihan yang tidak tuntas dilaporkan eksplisit
+  (bukan diklaim berhasil).
+- **Restore memaksa autentikasi ulang.** Database hasil restore bisa punya user/role/kredensial
+  berbeda, jadi sesi lama selalu dibuang dan layar login/setup ditampilkan.
+- Bila database lokal tidak bisa dibuka saat startup, aplikasi menampilkan layar pemulihan
+  (`Coba Lagi` / `Pulihkan Backup`) memakai BackupService yang sama — tanpa crash, tanpa reset
+  destruktif.
+- Android platform backup dinonaktifkan (`allowBackup=false`) dan diperkuat oleh
+  `backup_rules.xml` + `data_extraction_rules.xml` yang mengecualikan seluruh data POS dari cloud
+  backup maupun transfer device-to-device.
+
+> **Paket `.trpz` belum dienkripsi.** File berisi data bisnis; simpan hanya di lokasi yang Anda
+> percaya. Enkripsi backup portabel adalah keputusan hardening terpisah setelah Track H.
 
 ## Keamanan
 
 - Password disimpan menggunakan PBKDF2-HMAC-SHA256 dengan random salt, bukan plaintext.
+- Work factor saat ini **600.000 iterasi** (naik dari 120.000). Hash lama tetap valid: verifikasi
+  memakai iterasi yang tersimpan di record, lalu login sukses menulis ulang hash ke work factor
+  terbaru. Tidak ada user existing yang di-invalidate.
 - Login failure dan cooldown disimpan di database sehingga restart aplikasi tidak menghapus throttling.
 - Install baru menggunakan owner bootstrap, bukan password default universal.
 - Refund diverifikasi lagi di repository sebagai aksi `ADMIN` aktif.
 - Pengelolaan user diverifikasi lagi di repository dan tidak dapat menghasilkan zero active admin.
 - Customer points/balance tidak dapat diubah langsung dari editor profil customer.
 - Secret signing tidak boleh ada di Git.
+- Tidak ada permission `INTERNET` / `ACCESS_NETWORK_STATE` pada APK rilis. Keduanya dihapus dari
+  merged manifest (`tools:node="remove"`) karena hanya ikut terbawa dependency telemetry ML Kit;
+  aplikasi memang tidak melakukan network I/O.
+- FileProvider hanya mengekspos dua path yang benar-benar dipakai: `cache/receipts/` (share PDF
+  struk, read-only) dan `files/product_photos/` (target capture kamera).
+
+## Release build
+
+- `isMinifyEnabled = true` dan `isShrinkResources = true` (R8 + resource shrinking).
+- `proguard-android-optimize.txt` + `proguard-rules.pro`, tanpa keep rule global seperti
+  `-keep class com.trapezo.** { *; }`.
+- `android.enableR8.fullMode=false`. R8 full mode terbukti membuat layar scanner crash
+  (`NullPointerException` pada teardown DisposableEffect) di build minified; compatibility mode
+  tetap melakukan shrinking, optimization, dan obfuscation.
+- Room schema saat ini **versi 5** (tanpa destructive migration).
 
 ## Known limitations
 
 - QRIS masih manual confirmation, belum payment gateway.
-- Cloud sync belum diimplementasikan; `SyncService` masih extension point.
-- Backup file SQLite saat ini belum dienkripsi.
-- Beberapa flow UI/pagination dan hardening Excel/image/printer/scanner masih masuk Track D-F berikutnya.
+- Cloud sync belum diimplementasikan; `SyncService` masih extension point. Tidak ada permission
+  `INTERNET` — ini disengaja.
+- Paket backup `.trpz` belum dienkripsi.
+- **Printer thermal Bluetooth belum diuji pada hardware fisik.** Jalur ESC/POS SPP masih harus
+  melewati acceptance test di printer nyata sebelum rollout produksi.
+- Login memakai PBKDF2 600.000 iterasi. Pada emulator x86_64 (`Medium_Phone`, API 36) satu operasi
+  hash/verify butuh ~5,7 detik; angka ini perlu diukur ulang di perangkat target sebelum work
+  factor difinalkan.
+- Beberapa semantik kolom lanjutan workbook Excel belum bisa dianggap round-trip penuh 49 field.
+
+## Governance sebelum tag produksi
+
+Branch `main` saat ini belum diproteksi. Sebelum tag/release produksi, konfigurasi berikut harus
+diaktifkan dan direview oleh auditor eksternal (di luar source code aplikasi):
+
+- `main` wajib lewat pull request;
+- Android CI wajib hijau sebagai required status check;
+- force push dinonaktifkan;
+- penghapusan branch dinonaktifkan.
 
 ## Struktur modul
 
@@ -138,20 +220,35 @@ com.trapezo.pos
 
 ## Testing
 
-Unit-test suite mencakup:
+Unit test (JVM) mencakup antara lain:
 
-- `CartEngineTest`
-- `PaymentAllocationTest`
-- `RefundRulesTest`
-- `PricingEngineTest`
-- `XlsxModuleTest`
-- `ExcelNumberParserTest`
-- `PasswordUtilTest`
+- `CartEngineTest`, `PricingEngineTest`, `PaymentAllocationTest`, `PaymentDraftTest`
+- `RefundRulesTest`, `RefundPreviewTest`, `MoneyOverflowTest`
+- `XlsxModuleTest`, `ExcelNumberParserTest`, `OperationalInputRulesTest`
+- `PasswordUtilTest` (work factor 600k, kompatibilitas hash 120k, penolakan record rusak)
+- `BackupPackageTest` (batas arsip, entri duplikat, traversal, batas writer)
+- `StoreLogoContainmentTest`, `UiPresentationTest`, `ReceiptTextSafetyTest`
+
+Instrumentation test (perangkat/emulator) mencakup antara lain:
+
+- `MigrationTest` (1→2→3→4→5), `BackupRoundTripTest`, `G3PreprodTest`
+- `ReleaseHardeningTest` (recovery startup, restore legacy `.db` fail-safe)
+- `CheckoutConcurrencyTest`, `RefundConcurrencyTest`, `ConcurrencyTest`
+- `RepositoryAuthorizationTest`, `AuthorizationTest`, `ProductExcelCategoryTest`
 
 GitHub Actions menjalankan:
 
 ```bash
-./gradlew testDebugUnitTest assembleDebug --stacktrace
+./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest --stacktrace
+./gradlew lintRelease assembleRelease --stacktrace
+```
+
+Job CI membuat keystore **ephemeral** dengan `keytool` sebelum task release, lalu menghapusnya.
+Lokal (dengan `keystore.properties` sendiri):
+
+```bash
+./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest connectedDebugAndroidTest --stacktrace
+./gradlew lintRelease assembleRelease bundleRelease --stacktrace
 ```
 
 ## Android Studio
