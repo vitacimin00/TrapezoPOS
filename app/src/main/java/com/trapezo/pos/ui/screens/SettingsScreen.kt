@@ -703,6 +703,12 @@ private fun DataSettings(onBackup: () -> Unit, onRestore: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // The .trpz package is structurally validated but NOT encrypted. Say so plainly.
+                Text(
+                    "Backup .trpz berisi data bisnis dan belum dienkripsi. Simpan file hanya di lokasi yang Anda percaya.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TrapezoStatus.warning
+                )
                 Button(
                     onClick = onBackup,
                     shape = Radius.field,
