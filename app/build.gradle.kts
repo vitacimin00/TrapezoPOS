@@ -14,10 +14,21 @@ val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use(::load)
 }
+val requiredSigningKeys = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
 val releaseSigningReady = keystorePropsFile.exists() &&
-    listOf("storeFile", "storePassword", "keyAlias", "keyPassword").all { key ->
+    requiredSigningKeys.all { key ->
         !keystoreProps.getProperty(key).isNullOrBlank() && keystoreProps.getProperty(key) != "CHANGE_ME"
-    }
+    } &&
+    // The keystore file itself must exist, otherwise packaging would fail late and confusingly.
+    rootProject.file(keystoreProps.getProperty("storeFile") ?: "").exists()
+
+/**
+ * Explicit, user-facing reason a distributable release artifact cannot be produced.
+ * Non-packaging release tasks (lintRelease, testReleaseUnitTest) stay runnable without secrets.
+ */
+val RELEASE_SIGNING_ERROR =
+    "Production release signing belum dikonfigurasi. Isi keystore.properties " +
+        "dengan keystore produksi sebelum membuat APK/AAB release."
 
 android {
     namespace = "com.trapezo.pos"
@@ -53,8 +64,10 @@ android {
 
     buildTypes {
         getByName("release") {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // R8 + resource shrinking for the production artifact.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isDebuggable = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (releaseSigningReady) signingConfig = signingConfigs.getByName("release")
         }
@@ -75,6 +88,23 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+/**
+ * FAIL CLOSED: a distributable release artifact must never be produced without real
+ * production signing. Only PACKAGING tasks are gated — `lintRelease`,
+ * `testReleaseUnitTest` and other release analysis tasks stay runnable without secrets.
+ */
+if (!releaseSigningReady) {
+    tasks.configureEach {
+        val gated = name == "packageRelease" ||
+            name == "assembleRelease" ||
+            name == "bundleRelease" ||
+            name == "packageReleaseBundle"
+        if (gated) {
+            doFirst { throw GradleException(RELEASE_SIGNING_ERROR) }
+        }
     }
 }
 
