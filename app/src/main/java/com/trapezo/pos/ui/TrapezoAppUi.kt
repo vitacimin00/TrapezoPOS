@@ -77,9 +77,14 @@ fun TrapezoRoot(vm: AppViewModel = viewModel()) {
     val session by vm.session.collectAsState()
     when {
         session.initializing -> Box(Modifier.fillMaxSize()) { LoadingState("Menyiapkan Trapezo POS…") }
-        session.needsSetup -> OwnerSetupScreen(session.loading, session.error, vm::setupOwner)
-        session.user == null -> LoginScreen(session.loading, session.error, vm::login)
-        else -> MainShell(user = session.user!!, onLogout = vm::logout)
+        session.needsSetup -> OwnerSetupScreen(session.loading, session.error, session.notice, vm::setupOwner)
+        session.user == null -> LoginScreen(session.loading, session.error, session.notice, vm::login)
+        else -> MainShell(
+            user = session.user!!,
+            onLogout = vm::logout,
+            onSessionRefresh = vm::refreshCurrentSession,
+            onSessionReauth = vm::forceReauthAfterRestore
+        )
     }
 }
 
@@ -143,6 +148,7 @@ private fun PasswordField(
 private fun OwnerSetupScreen(
     loading: Boolean,
     error: String?,
+    notice: String?,
     onSetup: (String, String, String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
@@ -174,6 +180,9 @@ private fun OwnerSetupScreen(
         (localError ?: error)?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
+        notice?.let {
+            Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+        }
         Button(
             onClick = {
                 localError = when {
@@ -193,7 +202,7 @@ private fun OwnerSetupScreen(
 }
 
 @Composable
-private fun LoginScreen(loading: Boolean, error: String?, onLogin: (String, String) -> Unit) {
+private fun LoginScreen(loading: Boolean, error: String?, notice: String?, onLogin: (String, String) -> Unit) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     AuthSurface {
@@ -219,6 +228,7 @@ private fun LoginScreen(loading: Boolean, error: String?, onLogin: (String, Stri
         )
         PasswordField(password, { password = it }, "Password")
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        notice?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
         Button(
             onClick = { onLogin(username, password) },
             enabled = !loading,
@@ -230,11 +240,18 @@ private fun LoginScreen(loading: Boolean, error: String?, onLogin: (String, Stri
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainShell(user: UserEntity, onLogout: () -> Unit) {
+private fun MainShell(
+    user: UserEntity,
+    onLogout: () -> Unit,
+    onSessionRefresh: () -> Unit,
+    onSessionReauth: (String?) -> Unit
+) {
     val destinations = remember(user.role) { Navigation.destinationsFor(user.role) }
     val compactPrimary = remember(user.role) { Navigation.compactPrimary(user.role) }
     val overflow = remember(user.role) { Navigation.compactOverflow(user.role) }
-    var destination by remember(user.id) { mutableStateOf(Navigation.startDestination(user.role)) }
+    // Keyed on both id and role so a role change re-routes to the new role's start
+    // destination immediately instead of leaving a now-unauthorized screen selected.
+    var destination by remember(user.id, user.role) { mutableStateOf(Navigation.startDestination(user.role)) }
     var overflowOpen by remember { mutableStateOf(false) }
     val snackbarHost = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -282,7 +299,7 @@ private fun MainShell(user: UserEntity, onLogout: () -> Unit) {
                                 AppDestination.TRANSACTIONS -> TransactionsScreen(user)
                                 AppDestination.CUSTOMERS -> CustomersScreen(user)
                                 AppDestination.REPORTS -> ReportsScreen()
-                                AppDestination.SETTINGS -> SettingsScreen(user)
+                                AppDestination.SETTINGS -> SettingsScreen(user, onSessionRefresh, onSessionReauth)
                             }
                         }
                     }

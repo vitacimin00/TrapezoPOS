@@ -15,7 +15,8 @@ data class SessionState(
     val initializing: Boolean = true,
     val needsSetup: Boolean = false,
     val loading: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val notice: String? = null
 )
 
 class AppViewModel : ViewModel() {
@@ -23,6 +24,11 @@ class AppViewModel : ViewModel() {
     val session: StateFlow<SessionState> = _session.asStateFlow()
 
     init {
+        reinitialize()
+    }
+
+    /** Re-evaluates whether the app should show setup or login, against the current DB. */
+    private fun reinitialize(notice: String? = null) {
         viewModelScope.launch {
             val hasUsers = AppGraph.users.hasUsers()
             val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
@@ -31,7 +37,8 @@ class AppViewModel : ViewModel() {
                 needsSetup = !hasUsers || legacyDefault,
                 error = if (legacyDefault) {
                     "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
-                } else null
+                } else null,
+                notice = notice
             )
         }
     }
@@ -78,5 +85,32 @@ class AppViewModel : ViewModel() {
 
     fun logout() {
         _session.value = SessionState(initializing = false)
+    }
+
+    /**
+     * Re-reads the SESSION's identity from the authoritative database. Called when the
+     * logged-in user edits their own record (role/name/username/password), so navigation
+     * and identity immediately follow the new role instead of a stale login snapshot.
+     * Forces logout when the user no longer exists or is no longer active.
+     */
+    fun refreshCurrentSession() {
+        val current = _session.value.user ?: return
+        viewModelScope.launch {
+            val fresh = AppGraph.users.byId(current.id)
+            if (fresh == null || !fresh.isActive) {
+                _session.value = SessionState(initializing = false)
+            } else {
+                _session.value = _session.value.copy(user = fresh)
+            }
+        }
+    }
+
+    /**
+     * Reinitializes authentication after a successful restore. A restored database may
+     * contain entirely different users/roles/credentials, so the previous in-memory
+     * identity must never be assumed to still represent the same person.
+     */
+    fun forceReauthAfterRestore(message: String? = null) {
+        reinitialize(notice = message ?: "Restore berhasil. Silakan masuk kembali menggunakan akun dari backup.")
     }
 }
