@@ -1,8 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider least privilege.
+
+  Only the two paths that production code actually shares are granted:
+
+  * cache-path "receipts"  -> ReceiptService shares the generated PDF receipt with an
+                              external viewer/share target using FLAG_GRANT_READ_URI_PERMISSION.
+  * files-path "product_photos" -> PhotoStorage.createCameraTarget() hands a writable content
+                              URI to the system camera (ActivityResultContracts.TakePicture),
+                              and ProductsScreen re-reads that captured file through the same
+                              provider before normalizing it. Removing this path breaks
+                              product photo capture.
+
+  Deliberately NOT granted (verified unused by any FileProvider call site):
+    files/exports    - Excel export uses SAF (no provider URI)
+    files/backups    - backup/restore uses SAF (no provider URI)
+    files/store_media - store logo is internal-only; never shared out
+-->
 <paths>
     <cache-path name="receipts" path="receipts/" />
-    <files-path name="exports" path="exports/" />
-    <files-path name="backups" path="backups/" />
     <files-path name="product_photos" path="product_photos/" />
-    <files-path name="store_media" path="store_media/" />
 </paths>
