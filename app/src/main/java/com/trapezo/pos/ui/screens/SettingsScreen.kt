@@ -238,8 +238,12 @@ fun SettingsScreen(user: UserEntity) {
                 onPickLogo = { logoLauncher.launch("image/*") },
                 onSave = {
                     scope.launch {
-                        AppGraph.store.save(draft.store, user.id)
-                        feedback?.success("Pengaturan toko disimpan")
+                        try {
+                            AppGraph.store.save(draft.store, user.id)
+                            feedback?.success("Pengaturan toko disimpan")
+                        } catch (e: Exception) {
+                            feedback?.error(e.message ?: "Gagal menyimpan pengaturan toko")
+                        }
                     }
                 }
             )
@@ -256,11 +260,15 @@ fun SettingsScreen(user: UserEntity) {
                         tax > 100 || service > 100 ->
                             feedback?.error("Pajak dan service charge maksimal 100%")
                         else -> scope.launch {
-                            AppGraph.settings.putSetting("pos.invoice_prefix", draft.invoicePrefix.trim().ifBlank { "INV" }, user.id)
-                            AppGraph.settings.putLongSetting("pos.tax_percent", tax, user.id)
-                            AppGraph.settings.putLongSetting("pos.service_percent", service, user.id)
-                            AppGraph.settings.putLongSetting("pos.rounding", rounding, user.id)
-                            feedback?.success("Pengaturan kasir disimpan")
+                            try {
+                                AppGraph.settings.putSetting("pos.invoice_prefix", draft.invoicePrefix.trim().ifBlank { "INV" }, user.id)
+                                AppGraph.settings.putLongSetting("pos.tax_percent", tax, user.id)
+                                AppGraph.settings.putLongSetting("pos.service_percent", service, user.id)
+                                AppGraph.settings.putLongSetting("pos.rounding", rounding, user.id)
+                                feedback?.success("Pengaturan kasir disimpan")
+                            } catch (e: Exception) {
+                                feedback?.error(e.message ?: "Gagal menyimpan pengaturan kasir")
+                            }
                         }
                     }
                 }
@@ -270,12 +278,16 @@ fun SettingsScreen(user: UserEntity) {
                 onDraft = { draft = it },
                 onSave = {
                     scope.launch {
-                        AppGraph.settings.putSetting("receipt.paper", draft.receiptPaper + "mm", user.id)
-                        AppGraph.settings.putSetting("receipt.footer", draft.receiptFooter, user.id)
-                        AppGraph.settings.putSetting("receipt.show_logo", if (draft.showLogo) "1" else "0", user.id)
-                        AppGraph.settings.putSetting("receipt.show_address", if (draft.showAddress) "1" else "0", user.id)
-                        AppGraph.settings.putSetting("receipt.show_phone", if (draft.showPhone) "1" else "0", user.id)
-                        feedback?.success("Pengaturan struk disimpan")
+                        try {
+                            AppGraph.settings.putSetting("receipt.paper", draft.receiptPaper + "mm", user.id)
+                            AppGraph.settings.putSetting("receipt.footer", draft.receiptFooter, user.id)
+                            AppGraph.settings.putSetting("receipt.show_logo", if (draft.showLogo) "1" else "0", user.id)
+                            AppGraph.settings.putSetting("receipt.show_address", if (draft.showAddress) "1" else "0", user.id)
+                            AppGraph.settings.putSetting("receipt.show_phone", if (draft.showPhone) "1" else "0", user.id)
+                            feedback?.success("Pengaturan struk disimpan")
+                        } catch (e: Exception) {
+                            feedback?.error(e.message ?: "Gagal menyimpan pengaturan struk")
+                        }
                     }
                 }
             )
@@ -365,11 +377,17 @@ fun SettingsScreen(user: UserEntity) {
             printers = paired,
             onDismiss = { selectPrinter = false },
             onSelect = { selected ->
-                draft = draft.copy(printerAddress = selected.address)
-                selectPrinter = false
+                // Persist first; only on success update the draft, close the picker, and
+                // claim the printer. On failure the old address stays untouched.
                 scope.launch {
-                    AppGraph.settings.putSetting("printer.address", selected.address, user.id)
-                    feedback?.success("Printer ${selected.name} dipilih")
+                    try {
+                        AppGraph.settings.putSetting("printer.address", selected.address, user.id)
+                        draft = draft.copy(printerAddress = selected.address)
+                        selectPrinter = false
+                        feedback?.success("Printer ${selected.name} dipilih")
+                    } catch (e: Exception) {
+                        feedback?.error(e.message ?: "Gagal menyimpan printer")
+                    }
                 }
             }
         )

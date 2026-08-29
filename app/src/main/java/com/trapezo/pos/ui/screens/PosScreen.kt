@@ -966,16 +966,14 @@ private fun PaymentSheet(
     onDismiss: () -> Unit,
     onComplete: (Map<String, Long>, Map<String, String>) -> Unit
 ) {
-    var methodId by remember(methods) { mutableStateOf(methods.firstOrNull()?.first ?: "") }
-    var amount by remember { mutableStateOf(total.toString()) }
-    var reference by remember { mutableStateOf("") }
-    var tenders by remember { mutableStateOf(linkedMapOf<String, Long>()) }
-    var references by remember { mutableStateOf(linkedMapOf<String, String>()) }
+    var draft by remember(methods) {
+        mutableStateOf(PaymentDraft.start(total, methods.firstOrNull()?.first ?: ""))
+    }
     var error by remember { mutableStateOf<String?>(null) }
 
-    val settled = PaymentAllocation.settle(tenders, total)
-    val remaining = (total - settled.settled.values.sum()).coerceAtLeast(0)
-    val isCash = methodId == PaymentAllocation.CASH
+    val settled = draft.settled
+    val remaining = draft.remaining
+    val isCash = draft.methodId == PaymentAllocation.CASH
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(
@@ -1005,8 +1003,8 @@ private fun PaymentSheet(
                     ) {
                         methods.forEach { (id, name) ->
                             androidx.compose.material3.FilterChip(
-                                selected = methodId == id,
-                                onClick = { methodId = id; amount = remaining.toString(); error = null },
+                                selected = draft.methodId == id,
+                                onClick = { draft = draft.selectMethod(id); error = null },
                                 label = { Text(name) },
                                 shape = Radius.control,
                                 modifier = Modifier.heightIn(min = Touch.min)
@@ -1014,9 +1012,9 @@ private fun PaymentSheet(
                         }
                     }
                     OutlinedTextField(
-                        value = amount,
-                        onValueChange = { amount = it; error = null },
-                        label = { Text("Nominal ${Labels.paymentMethod(methodId)}") },
+                        value = draft.amount,
+                        onValueChange = { draft = draft.changeAmount(it); error = null },
+                        label = { Text("Nominal ${Labels.paymentMethod(draft.methodId)}") },
                         singleLine = true,
                         shape = Radius.field,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
@@ -1026,15 +1024,15 @@ private fun PaymentSheet(
                         SectionHeader("Nominal cepat")
                         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
                             val quick = quickCashAmounts(remaining)
-                            AssistChip(onClick = { amount = remaining.toString() }, label = { Text("Uang pas") })
+                            AssistChip(onClick = { draft = draft.changeAmount(remaining.toString()) }, label = { Text("Uang pas") })
                             quick.forEach { value ->
-                                AssistChip(onClick = { amount = value.toString() }, label = { Text(Money.num(value)) })
+                                AssistChip(onClick = { draft = draft.changeAmount(value.toString()) }, label = { Text(Money.num(value)) })
                             }
                         }
                     } else {
                         OutlinedTextField(
-                            value = reference,
-                            onValueChange = { reference = it },
+                            value = draft.reference,
+                            onValueChange = { draft = draft.changeReference(it) },
                             label = { Text("Nomor referensi (opsional)") },
                             singleLine = true,
                             shape = Radius.field,
@@ -1043,44 +1041,26 @@ private fun PaymentSheet(
                     }
                     OutlinedButton(
                         onClick = {
-                            val n = Money.parseOrNull(amount)
-                            when {
-                                methodId.isBlank() -> error = "Pilih metode pembayaran terlebih dahulu"
-                                n == null || n <= 0 -> error = "Nominal tidak valid"
-                                else -> {
-                                    val existing = tenders[methodId] ?: 0L
-                                    val sum = Money.addExact(existing, n)
-                                    if (sum == null) error = "Nominal pembayaran melampaui batas"
-                                    else {
-                                        val copy = LinkedHashMap(tenders).apply { put(methodId, sum) }
-                                        val candidate = PaymentAllocation.settle(copy, total)
-                                        if (methodId != PaymentAllocation.CASH && candidate.settled.isEmpty()) {
-                                            error = "Pembayaran non-tunai tidak boleh melebihi sisa tagihan"
-                                        } else {
-                                            tenders = copy
-                                            if (reference.isNotBlank()) {
-                                                references = LinkedHashMap(references).apply { put(methodId, reference) }
-                                            }
-                                            amount = (total - candidate.settled.values.sum()).coerceAtLeast(0).toString()
-                                            reference = ""
-                                            error = null
-                                        }
-                                    }
+                            when (val result = draft.addTender()) {
+                                is AddTenderOutcome.Accepted -> {
+                                    draft = result.draft
+                                    error = null
                                 }
+                                is AddTenderOutcome.Rejected -> error = result.message
                             }
                         },
                         shape = Radius.field,
                         modifier = Modifier.fillMaxWidth().heightIn(min = Touch.control)
                     ) { Text("Tambah Pembayaran") }
 
-                    if (tenders.isNotEmpty()) {
+                    if (draft.tenders.isNotEmpty()) {
                         SectionHeader("Alokasi pembayaran")
-                        tenders.forEach { (code, value) ->
+                        draft.tenders.forEach { (code, value) ->
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Text(Labels.paymentMethod(code), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                                 MoneyText(value, weight = FontWeight.Medium)
                                 IconButton(
-                                    onClick = { tenders = LinkedHashMap(tenders).apply { remove(code) } },
+                                    onClick = { draft = draft.removeTender(code); error = null },
                                     modifier = Modifier.size(Touch.min)
                                 ) { Icon(Icons.Default.Close, contentDescription = "Hapus ${Labels.paymentMethod(code)}") }
                             }
@@ -1096,10 +1076,10 @@ private fun PaymentSheet(
                 }
                 Button(
                     onClick = {
-                        val finalSettled = PaymentAllocation.settle(tenders, total)
+                        val finalSettled = draft.settled
                         if (finalSettled.shortfall > 0 || finalSettled.settled.values.sum() != total) {
                             error = "Pembayaran belum mencukupi atau alokasi tidak valid"
-                        } else onComplete(tenders, references)
+                        } else onComplete(draft.tenders, draft.references)
                     },
                     enabled = methods.isNotEmpty(),
                     shape = Radius.field,
