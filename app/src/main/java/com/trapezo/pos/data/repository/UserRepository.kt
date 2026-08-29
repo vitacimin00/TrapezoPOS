@@ -19,6 +19,7 @@ class UserRepository(
 
     suspend fun all(): List<UserEntity> = withContext(Dispatchers.IO) { users.all() }
     suspend fun hasUsers(): Boolean = withContext(Dispatchers.IO) { users.count() > 0 }
+    suspend fun byId(id: Long): UserEntity? = withContext(Dispatchers.IO) { users.byId(id) }
 
     /** Existing installs created by the legacy seed must not keep admin/admin123. */
     suspend fun requiresLegacyDefaultReset(): Boolean = withContext(Dispatchers.IO) {

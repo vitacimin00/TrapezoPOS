@@ -52,11 +52,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -123,7 +125,11 @@ private enum class SettingsSection(val label: String, val description: String, v
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(user: UserEntity) {
+fun SettingsScreen(
+    user: UserEntity,
+    onSessionRefresh: () -> Unit,
+    onSessionReauth: (String?) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val feedback = rememberFeedback()
@@ -134,6 +140,7 @@ fun SettingsScreen(user: UserEntity) {
 
     var draft by remember { mutableStateOf(SettingsDraft()) }
     var loaded by remember { mutableStateOf(false) }
+    var persistedLogo by remember { mutableStateOf<String?>(null) }
     var section by remember { mutableStateOf<SettingsSection?>(null) }
     var paired by remember { mutableStateOf(emptyList<BluetoothPrinterService.PairedPrinter>()) }
     var selectPrinter by remember { mutableStateOf(false) }
@@ -143,6 +150,7 @@ fun SettingsScreen(user: UserEntity) {
     fun load() {
         scope.launch {
             val store = AppGraph.store.get()
+            persistedLogo = store.logo
             draft = SettingsDraft(
                 store = store,
                 invoicePrefix = AppGraph.settings.raw("pos.invoice_prefix", "INV"),
@@ -165,6 +173,8 @@ fun SettingsScreen(user: UserEntity) {
     }
 
     val backupLauncher = rememberLauncherForActivityResult(
+        // Generic MIME so the SAF picker preserves the ".trpz" extension instead of
+        // force-appending ".zip"; the package content is self-describing via its magic.
         ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
@@ -180,9 +190,27 @@ fun SettingsScreen(user: UserEntity) {
         if (uri != null) {
             val path = StoreLogoStorage.importFromUri(context, uri)
             if (path != null) {
+                // Replacing an unsaved draft logo: delete the now-unreferenced previous draft.
+                val previousDraft = draft.store.logo
+                if (previousDraft != null && previousDraft != persistedLogo) {
+                    StoreLogoStorage.deleteManaged(previousDraft)
+                }
                 draft = draft.copy(store = draft.store.copy(logo = path))
                 feedback?.info("Logo dipilih. Tekan Simpan untuk menerapkannya.")
             } else feedback?.error("Logo tidak dapat dibaca")
+        }
+    }
+
+    // If the Settings screen is left (or the app closes) with an unsaved draft logo,
+    // retire that unreferenced managed file. The persisted logo is never touched here.
+    val latestDraftLogo by rememberUpdatedState(draft.store.logo)
+    val latestPersistedLogo by rememberUpdatedState(persistedLogo)
+    DisposableEffect(Unit) {
+        onDispose {
+            val draftLogo = latestDraftLogo
+            if (draftLogo != null && draftLogo != latestPersistedLogo) {
+                StoreLogoStorage.deleteManaged(draftLogo)
+            }
         }
     }
     val bluetoothPermission = rememberLauncherForActivityResult(
@@ -240,8 +268,15 @@ fun SettingsScreen(user: UserEntity) {
                     scope.launch {
                         try {
                             AppGraph.store.save(draft.store, user.id)
+                            // Success: the new logo is now authoritative; retire the old one.
+                            val old = persistedLogo
+                            if (old != null && old != draft.store.logo) {
+                                StoreLogoStorage.deleteManaged(old)
+                            }
+                            persistedLogo = draft.store.logo
                             feedback?.success("Pengaturan toko disimpan")
                         } catch (e: Exception) {
+                            // Keep both the new draft (for retry) and the old persisted logo.
                             feedback?.error(e.message ?: "Gagal menyimpan pengaturan toko")
                         }
                     }
@@ -260,15 +295,11 @@ fun SettingsScreen(user: UserEntity) {
                         tax > 100 || service > 100 ->
                             feedback?.error("Pajak dan service charge maksimal 100%")
                         else -> scope.launch {
-                            try {
-                                AppGraph.settings.putSetting("pos.invoice_prefix", draft.invoicePrefix.trim().ifBlank { "INV" }, user.id)
-                                AppGraph.settings.putLongSetting("pos.tax_percent", tax, user.id)
-                                AppGraph.settings.putLongSetting("pos.service_percent", service, user.id)
-                                AppGraph.settings.putLongSetting("pos.rounding", rounding, user.id)
-                                feedback?.success("Pengaturan kasir disimpan")
-                            } catch (e: Exception) {
-                                feedback?.error(e.message ?: "Gagal menyimpan pengaturan kasir")
-                            }
+                            val err = AppGraph.settings.savePosConfiguration(
+                                draft.invoicePrefix, tax, service, rounding, user.id
+                            )
+                            if (err == null) feedback?.success("Pengaturan kasir disimpan")
+                            else feedback?.error(err)
                         }
                     }
                 }
@@ -278,16 +309,12 @@ fun SettingsScreen(user: UserEntity) {
                 onDraft = { draft = it },
                 onSave = {
                     scope.launch {
-                        try {
-                            AppGraph.settings.putSetting("receipt.paper", draft.receiptPaper + "mm", user.id)
-                            AppGraph.settings.putSetting("receipt.footer", draft.receiptFooter, user.id)
-                            AppGraph.settings.putSetting("receipt.show_logo", if (draft.showLogo) "1" else "0", user.id)
-                            AppGraph.settings.putSetting("receipt.show_address", if (draft.showAddress) "1" else "0", user.id)
-                            AppGraph.settings.putSetting("receipt.show_phone", if (draft.showPhone) "1" else "0", user.id)
-                            feedback?.success("Pengaturan struk disimpan")
-                        } catch (e: Exception) {
-                            feedback?.error(e.message ?: "Gagal menyimpan pengaturan struk")
-                        }
+                        val err = AppGraph.settings.saveReceiptConfiguration(
+                            draft.receiptPaper, draft.receiptFooter,
+                            draft.showLogo, draft.showAddress, draft.showPhone, user.id
+                        )
+                        if (err == null) feedback?.success("Pengaturan struk disimpan")
+                        else feedback?.error(err)
                     }
                 }
             )
@@ -306,7 +333,7 @@ fun SettingsScreen(user: UserEntity) {
             )
             SettingsSection.DATA -> DataSettings(
                 onBackup = { backupLauncher.launch(backup.suggestedName()) },
-                onRestore = { restoreLauncher.launch(arrayOf("application/octet-stream", "application/x-sqlite3", "*/*")) }
+                onRestore = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream", "application/x-sqlite3", "*/*")) }
             )
             SettingsSection.USERS -> UserSettings(onManage = { usersOpen = true })
         }
@@ -396,7 +423,7 @@ fun SettingsScreen(user: UserEntity) {
         ConfirmActionDialog(
             title = "Ganti data dengan file backup?",
             message = "Seluruh data saat ini akan digantikan setelah file backup diverifikasi. " +
-                "Data lama disimpan sebagai cadangan pemulihan. Aplikasi perlu dibuka ulang setelah proses selesai.",
+                "Anda diminta masuk kembali menggunakan akun dari backup setelah proses selesai.",
             confirmLabel = "Restore",
             tone = Tone.DANGER,
             onDismiss = { restoreUri = null },
@@ -404,15 +431,24 @@ fun SettingsScreen(user: UserEntity) {
                 restoreUri = null
                 scope.launch {
                     val result = backup.restoreFrom(uri)
-                    if (result.ok) feedback?.success(result.message) else feedback?.error(result.message)
+                    if (result.ok) {
+                        // A restored DB may hold different users/roles/credentials; force
+                        // re-authentication instead of keeping the stale in-memory session.
+                        onSessionReauth(result.message)
+                    } else feedback?.error(result.message)
                 }
             }
         )
     }
     if (usersOpen) {
-        UsersSheet(actor = user, onDismiss = { usersOpen = false }, onMessage = { ok, message ->
-            if (ok) feedback?.success(message) else feedback?.error(message)
-        })
+        UsersSheet(
+            actor = user,
+            onDismiss = { usersOpen = false },
+            onMessage = { ok, message ->
+                if (ok) feedback?.success(message) else feedback?.error(message)
+            },
+            onSelfUpdated = onSessionRefresh
+        )
     }
 }
 
@@ -763,7 +799,12 @@ private fun PrinterPickerSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun UsersSheet(actor: UserEntity, onDismiss: () -> Unit, onMessage: (Boolean, String) -> Unit) {
+private fun UsersSheet(
+    actor: UserEntity,
+    onDismiss: () -> Unit,
+    onMessage: (Boolean, String) -> Unit,
+    onSelfUpdated: () -> Unit
+) {
     val scope = rememberCoroutineScope()
     var users by remember { mutableStateOf(emptyList<UserEntity>()) }
     var editorTarget by remember { mutableStateOf<UserEntity?>(null) }
@@ -844,10 +885,14 @@ private fun UsersSheet(actor: UserEntity, onDismiss: () -> Unit, onMessage: (Boo
             actor = actor,
             onDismiss = { editorOpen = false; editorTarget = null },
             onSaved = { message ->
+                val wasSelfEdit = editorTarget?.id == actor.id
                 editorOpen = false
                 editorTarget = null
                 onMessage(true, message)
                 refresh()
+                // If the logged-in admin edited their OWN record, refresh the session so
+                // role/identity follow the authoritative DB immediately.
+                if (wasSelfEdit) onSelfUpdated()
             },
             onError = { onMessage(false, it) }
         )
