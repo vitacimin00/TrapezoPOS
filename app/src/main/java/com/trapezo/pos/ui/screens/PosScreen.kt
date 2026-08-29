@@ -396,28 +396,14 @@ private fun PosHeader(
     onCustomer: () -> Unit,
     onClearCustomer: () -> Unit
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Space.lg, vertical = Space.md),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Space.md)
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text("Kasir", style = MaterialTheme.typography.titleLarge)
-            Text(
-                "${user.name} • ${if (invoice.isBlank()) "menyiapkan nomor" else invoice}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        if (shift == null) {
-            StatusBadge("Shift belum dibuka", Tone.WARNING, Icons.Default.Schedule)
-        } else {
-            StatusBadge("Shift aktif", Tone.SUCCESS, Icons.Default.Schedule)
-        }
+    // On compact widths the title, shift badge, and customer control cannot share one row
+    // without ellipsizing the invoice number, so the context moves to a second line.
+    val compact = !currentWidthClass.isExpanded
+    val shiftBadge: @Composable () -> Unit = {
+        if (shift == null) StatusBadge("Shift belum dibuka", Tone.WARNING, Icons.Default.Schedule)
+        else StatusBadge("Shift aktif", Tone.SUCCESS, Icons.Default.Schedule)
+    }
+    val customerControl: @Composable () -> Unit = {
         if (customer == null) {
             OutlinedButton(onClick = onCustomer, shape = Radius.field, modifier = Modifier.heightIn(min = Touch.control)) {
                 Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -430,6 +416,45 @@ private fun PosHeader(
                 label = { Text(customer.name, maxLines = 1) },
                 leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 trailingIcon = { Icon(Icons.Default.Close, contentDescription = "Hapus customer", modifier = Modifier.size(16.dp)) }
+            )
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Space.lg, vertical = Space.md),
+        verticalArrangement = Arrangement.spacedBy(Space.sm)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.md)) {
+            Column(Modifier.weight(1f)) {
+                Text("Kasir", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    user.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (!compact) {
+                shiftBadge()
+                customerControl()
+            } else {
+                customerControl()
+            }
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Space.sm)
+        ) {
+            if (compact) shiftBadge()
+            // Invoice number gets its own line on phones so it is never truncated.
+            Text(
+                if (invoice.isBlank()) "Menyiapkan nomor transaksi…" else invoice,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }

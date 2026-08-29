@@ -973,11 +973,25 @@ private fun ProductEditor(
                     Column(verticalArrangement = Arrangement.spacedBy(Space.sm)) {
                         EditorToggle("Lacak stok produk ini", draft.track) { draft = draft.copy(track = it) }
                         if (draft.track) {
-                            EditorField(
-                                if (existing == null) "Stok awal" else "Stok saat ini",
-                                draft.stock,
-                                numeric = true
-                            ) { draft = draft.copy(stock = it) }
+                            if (existing == null) {
+                                EditorField("Stok awal", draft.stock, numeric = true) {
+                                    draft = draft.copy(stock = it)
+                                }
+                            } else {
+                                // Locked invariant: stock only moves through adjustment/import so the
+                                // movement ledger stays authoritative. Show it read-only here.
+                                OutlinedTextField(
+                                    value = draft.stock,
+                                    onValueChange = {},
+                                    readOnly = true,
+                                    enabled = false,
+                                    label = { Text("Stok saat ini") },
+                                    singleLine = true,
+                                    shape = Radius.field,
+                                    supportingText = { Text("Ubah stok melalui Adjustment Stok agar tercatat di riwayat.") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                             EditorField("Batas stok menipis", draft.minimum, numeric = true) { draft = draft.copy(minimum = it) }
                         }
                         EditorField("Satuan", draft.uom) { draft = draft.copy(uom = it) }

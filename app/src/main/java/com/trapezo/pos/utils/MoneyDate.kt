@@ -1,6 +1,7 @@
 package com.trapezo.pos.utils
 
 import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -12,7 +13,18 @@ object Money {
     /** Maximum legitimate Rupiah amount for a single operational value (9 trillion). */
     const val MAX_RUPIAH = 9_000_000_000_000L
 
-    private val nf: NumberFormat = DecimalFormat("#,##0")
+    /**
+     * Indonesian Rupiah grouping is deterministic and locale-independent: a period is the
+     * thousand separator regardless of the device's default locale. Relying on the default
+     * locale made the same amount render as "Rp 28,500" or "Rp 28.500" per device.
+     */
+    private val nf: NumberFormat = DecimalFormat(
+        "#,##0",
+        DecimalFormatSymbols(Locale("id", "ID")).apply {
+            groupingSeparator = '.'
+            decimalSeparator = ','
+        }
+    )
 
     /** 150000 -> "Rp 150.000" */
     fun fmt(v: Long): String = "Rp " + nf.format(v)
