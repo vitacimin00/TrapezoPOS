@@ -73,6 +73,21 @@ interface SaleDao {
     )
     suspend fun totalsBetween(from: Long, to: Long): TotalRow
 
+    /**
+     * Presentation-only split of the SAME window used by [totalsBetween]: gross sale value
+     * and refund value are returned separately so the report screen can show the
+     * Gross → Refund → Net hierarchy. Net remains gross - refund, identical to
+     * [totalsBetween]; no existing financial calculation is altered.
+     */
+    @Query(
+        """SELECT
+             COALESCE((SELECT SUM(s.grandTotal) FROM sales s
+                       WHERE s.createdAt BETWEEN :from AND :to AND s.transactionStatus != 'VOID'), 0) AS gross,
+             COALESCE((SELECT SUM(r.total) FROM refunds r
+                       WHERE r.createdAt BETWEEN :from AND :to), 0) AS refunded"""
+    )
+    suspend fun grossAndRefundBetween(from: Long, to: Long): GrossRefundRow
+
     @Query(
         """SELECT method, SUM(amount) AS total, CAST(SUM(saleCount) AS INTEGER) AS cnt
            FROM (
@@ -145,6 +160,7 @@ interface SaleDao {
     suspend fun totalsByCashier(from: Long, to: Long): List<CashierTotal>
 
     data class TotalRow(val total: Long, val cnt: Int)
+    data class GrossRefundRow(val gross: Long, val refunded: Long)
     data class DailyTotalRow(val dayStart: Long, val total: Long?, val cnt: Int)
     data class MethodTotalRow(val method: String, val total: Long?, val cnt: Int)
 }
