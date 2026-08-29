@@ -11,16 +11,21 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Local SQLite backup/restore through Storage Access Framework streams.
+ * Local backup/restore through Storage Access Framework streams.
  *
- * Snapshot safety order:
+ * Track G3 introduces a versioned PACKAGE (.trpz): a ZIP-compatible container carrying the
+ * Room database PLUS the managed product photos and store logo referenced by that database,
+ * so a restore no longer loses media. Restore auto-detects and still accepts historical raw
+ * SQLite (.db) backups.
+ *
+ * Snapshot safety order (unchanged Track A–E safeguards):
  *   1. serialize via [lock] (backup/restore never overlap);
  *   2. ensure the Trapezo `application_id` marker is set (idempotent);
  *   3. run a FULL checkpoint and *inspect* its result — a BUSY/incomplete checkpoint
  *      aborts the backup rather than producing a snapshot that misses the marker;
  *   4. close Room cleanly (AppDatabase.closeAndClear) so no SQLite handle can
  *      auto-checkpoint into the main file while bytes are being copied;
- *   5. copy the stable main database;
+ *   5. copy the stable main database (+ referenced media) into the package;
  *   6. Room reopens lazily through AppGraph on the next access.
  *
  * Room owns `PRAGMA user_version`; we never set it manually. The Trapezo marker
@@ -32,8 +37,16 @@ class BackupService(private val context: Context) {
     companion object {
         /** "TRPZ" in big-endian — SQLite application_id marker for Trapezo POS backups. */
         internal const val APP_ID: Int = 0x5452505A
-        private const val CURRENT_SCHEMA_VERSION = 5
+
+        /** Room schema version the app currently ships. */
+        internal const val CURRENT_SCHEMA_VERSION = 5
+
+        /** Operational cap for the database file itself. */
         private const val MAX_BACKUP_BYTES = 512L * 1024 * 1024
+
+        /** Cap for the total restore input stream (package: DB + media + overhead). */
+        private const val MAX_PACKAGE_INPUT_BYTES = 1_100L * 1024 * 1024
+
         private val REQUIRED_TABLES = listOf(
             "users", "stores", "categories", "products", "product_barcodes",
             "inventory_movements", "customers", "sales", "sale_items", "payments",
@@ -44,17 +57,55 @@ class BackupService(private val context: Context) {
     }
 
     fun suggestedName(): String =
-        "TrapezoPOS_Backup_${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}.db"
+        "TrapezoPOS_Backup_${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}.trpz"
 
-    /**
-     * Returns the checkpoint result as (busy, logPages, checkpointedPages).
-     * busy != 0 or logPages != checkpointedPages means the checkpoint did not fully
-     * transfer WAL content into the main database file.
-     */
+    /** Returns the checkpoint result as (busy, logPages, checkpointedPages). */
     private fun checkpointResult(db: androidx.sqlite.db.SupportSQLiteDatabase): Triple<Int, Int, Int> {
         db.query("PRAGMA wal_checkpoint(FULL)").use { c ->
             return if (c.moveToFirst()) Triple(c.getInt(0), c.getInt(1), c.getInt(2)) else Triple(1, 0, 0)
         }
+    }
+
+    private fun photoDir() = File(context.filesDir, "product_photos")
+    private fun logoDir() = File(context.filesDir, "store_media")
+
+    /** Resolves a DB-stored media path to a managed file, rejecting anything outside its dir. */
+    private fun managedMediaFile(path: String, dir: File, prefix: String): File {
+        val f = File(path)
+        val canon = try { f.canonicalFile } catch (_: Exception) {
+            throw IllegalArgumentException("Referensi media tidak valid")
+        }
+        val canonDir = try { dir.canonicalFile } catch (_: Exception) { dir.absoluteFile }
+        if (!f.name.startsWith(prefix) || !canon.path.startsWith(canonDir.path + File.separator)) {
+            throw IllegalArgumentException("Referensi media tidak valid")
+        }
+        return f
+    }
+
+    /** Distinct referenced, existing managed files (throws when a referenced file is missing). */
+    private fun gatherManagedFiles(
+        db: androidx.sqlite.db.SupportSQLiteDatabase,
+        sql: String,
+        dir: File,
+        prefix: String,
+        label: String
+    ): List<File> {
+        val found = LinkedHashSet<File>()
+        var missing = 0
+        db.query(sql).use { c ->
+            while (c.moveToNext()) {
+                val path = c.getString(0)
+                if (path.isNullOrBlank()) continue
+                val f = managedMediaFile(path, dir, prefix)
+                if (!f.exists()) missing++ else found.add(f)
+            }
+        }
+        if (missing > 0) {
+            throw IllegalArgumentException(
+                "Backup tidak dapat dibuat karena $missing $label yang tercatat tidak ditemukan."
+            )
+        }
+        return found.toList()
     }
 
     suspend fun backupTo(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
@@ -65,16 +116,25 @@ class BackupService(private val context: Context) {
                 if (dbFile.length() > MAX_BACKUP_BYTES) return@withMaintenance BackupResult(false, "Database terlalu besar untuk dibackup")
 
                 val db = current.openHelper.writableDatabase
-                // 1. ensure the Trapezo marker is set (idempotent).
                 db.execSQL("PRAGMA application_id = $APP_ID")
-                // 2. checkpoint WAL into the main file and inspect the result.
                 val (busy, logPages, checkpointed) = checkpointResult(db)
                 if (busy != 0 || logPages != checkpointed) {
                     return@withMaintenance BackupResult(false, "Checkpoint tidak selesai (busy=$busy, $checkpointed/$logPages halaman); coba lagi saat tidak ada operasi")
                 }
-                // 3. close Room so no handle can auto-checkpoint into the file mid-copy.
+
+                // Gather referenced media BEFORE closing Room.
+                val photos = gatherManagedFiles(
+                    db, "SELECT photo FROM products WHERE photo IS NOT NULL AND photo != ''",
+                    photoDir(), "product_", "foto produk"
+                )
+                val logos = gatherManagedFiles(
+                    db, "SELECT logo FROM stores WHERE logo IS NOT NULL AND logo != ''",
+                    logoDir(), "store_logo_", "logo toko"
+                )
+
                 AppDatabase.closeAndClear()
-                // 4. re-open the raw file read-only and confirm the marker is durable.
+
+                // Re-open raw read-only and confirm the marker is durable before copying.
                 val probe = android.database.sqlite.SQLiteDatabase.openDatabase(
                     dbFile.path, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY
                 )
@@ -85,10 +145,12 @@ class BackupService(private val context: Context) {
                 if (visible != APP_ID) {
                     return@withMaintenance BackupResult(false, "Marker backup belum tertanam pada file utama")
                 }
-                // 5. copy the now-stable main database.
-                context.contentResolver.openOutputStream(uri)?.use { out ->
-                    dbFile.inputStream().use { it.copyTo(out) }
-                } ?: return@withMaintenance BackupResult(false, "Tidak bisa menulis file backup")
+
+                val out = context.contentResolver.openOutputStream(uri)
+                    ?: return@withMaintenance BackupResult(false, "Tidak bisa menulis file backup")
+                out.use {
+                    BackupPackage.write(out, dbFile, photos, logos, CURRENT_SCHEMA_VERSION, System.currentTimeMillis())
+                }
                 BackupResult(true, "Backup berhasil dibuat", suggestedName())
             } catch (e: Exception) {
                 BackupResult(false, "Backup gagal: ${e.message}")
@@ -99,50 +161,197 @@ class BackupService(private val context: Context) {
     suspend fun restoreFrom(uri: Uri): BackupResult = withContext(Dispatchers.IO) {
         synchronized(lock) {
             AppDatabase.withMaintenance {
-            val live = context.getDatabasePath(AppDatabase.NAME)
-            val parent = live.parentFile ?: return@withMaintenance BackupResult(false, "Folder database tidak tersedia")
-            val staged = File(parent, "${AppDatabase.NAME}.restore_staged")
-            val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
-            val wal = File(parent, "${AppDatabase.NAME}-wal")
-            val shm = File(parent, "${AppDatabase.NAME}-shm")
-            try {
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    staged.outputStream().use { out ->
-                        val buf = ByteArray(64 * 1024)
-                        var total = 0L
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            total += n
-                            if (total > MAX_BACKUP_BYTES) throw IllegalStateException("File backup melebihi batas ukuran")
-                            out.write(buf, 0, n)
+                val live = context.getDatabasePath(AppDatabase.NAME)
+                val parent = live.parentFile ?: return@withMaintenance BackupResult(false, "Folder database tidak tersedia")
+                val staged = File(parent, "${AppDatabase.NAME}.restore_staged")
+                try {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        staged.outputStream().use { out ->
+                            val buf = ByteArray(64 * 1024)
+                            var total = 0L
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                total += n
+                                if (total > MAX_PACKAGE_INPUT_BYTES) throw IllegalStateException("File backup melebihi batas ukuran")
+                                out.write(buf, 0, n)
+                            }
                         }
+                    } ?: return@withMaintenance BackupResult(false, "Tidak dapat membaca file yang dipilih")
+
+                    if (isRawSqlite(staged)) {
+                        val r = restoreLegacy(staged, live)
+                        staged.delete()
+                        return@withMaintenance r
                     }
-                } ?: return@withMaintenance BackupResult(false, "Tidak dapat membaca file yang dipilih")
-
-                val error = validateStaged(staged)
-                if (error != null) {
+                    if (isZip(staged)) {
+                        val r = restorePackage(staged, live)
+                        staged.delete()
+                        return@withMaintenance r
+                    }
                     staged.delete()
-                    return@withMaintenance BackupResult(false, error)
+                    return@withMaintenance BackupResult(false, "File bukan backup Trapezo POS yang valid")
+                } catch (e: Exception) {
+                    staged.delete()
+                    BackupResult(false, "Restore gagal: ${e.message}")
                 }
+            }
+        }
+    }
 
-                AppDatabase.closeAndClear()
-                if (previous.exists()) previous.delete()
-                if (live.exists() && !live.renameTo(previous)) {
-                    return@withMaintenance BackupResult(false, "Gagal mengamankan database lama")
+    private fun isRawSqlite(f: File): Boolean {
+        val header = ByteArray(16)
+        f.inputStream().use { it.read(header) }
+        return header.copyOfRange(0, 16).toString(Charsets.US_ASCII).startsWith("SQLite format 3")
+    }
+
+    private fun isZip(f: File): Boolean {
+        val header = ByteArray(4)
+        f.inputStream().use { it.read(header) }
+        return header[0] == 'P'.code.toByte() && header[1] == 'K'.code.toByte()
+    }
+
+    /** Legacy raw-SQLite restore: DB only, media never included. */
+    private fun restoreLegacy(staged: File, live: File): BackupResult {
+        if (staged.length() > MAX_BACKUP_BYTES) {
+            return BackupResult(false, "File backup melebihi batas ukuran")
+        }
+        val error = validateStaged(staged)
+        if (error != null) return BackupResult(false, error)
+
+        val parent = live.parentFile ?: return BackupResult(false, "Folder database tidak tersedia")
+        val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
+        val wal = File(parent, "${AppDatabase.NAME}-wal")
+        val shm = File(parent, "${AppDatabase.NAME}-shm")
+        AppDatabase.closeAndClear()
+        if (previous.exists()) previous.delete()
+        if (live.exists() && !live.renameTo(previous)) {
+            return BackupResult(false, "Gagal mengamankan database lama")
+        }
+        wal.delete(); shm.delete()
+        if (!staged.renameTo(live)) {
+            if (previous.exists()) previous.renameTo(live)
+            return BackupResult(false, "Gagal menerapkan database restore")
+        }
+        return BackupResult(true, "Backup database lama berhasil dipulihkan. Foto/logo dari backup lama hanya tersedia jika file medianya masih ada di perangkat.")
+    }
+
+    /** Package restore: unpack, validate, rebind media paths, then atomically apply. */
+    private fun restorePackage(staged: File, live: File): BackupResult {
+        val stagingDir = File(context.filesDir, "restore_stage")
+        val content = try {
+            BackupPackage.read(staged, stagingDir, MAX_BACKUP_BYTES)
+        } catch (e: BackupPackage.ParseException) {
+            return BackupResult(false, e.message ?: "Arsip backup tidak valid")
+        }
+        if (content.manifest.schemaVersion < 1 || content.manifest.schemaVersion > CURRENT_SCHEMA_VERSION) {
+            stagingDir.deleteRecursively()
+            return BackupResult(false, "Versi skema backup tidak kompatibel dengan aplikasi")
+        }
+
+        // Structural SQLite validation of the extracted database.
+        val dbError = validateStaged(content.dbFile)
+        if (dbError != null) {
+            stagingDir.deleteRecursively()
+            return BackupResult(false, dbError)
+        }
+
+        // Rebind media paths onto the CURRENT installation and verify archive completeness.
+        try {
+            rebindMediaPaths(content, stagingDir)
+        } catch (e: Exception) {
+            stagingDir.deleteRecursively()
+            return BackupResult(false, e.message ?: "Arsip backup tidak lengkap")
+        }
+
+        // Apply with rollback across DB + both media buckets.
+        val parent = live.parentFile ?: run { stagingDir.deleteRecursively(); return BackupResult(false, "Folder database tidak tersedia") }
+        val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
+        val wal = File(parent, "${AppDatabase.NAME}-wal")
+        val shm = File(parent, "${AppDatabase.NAME}-shm")
+        val photoPre = File(context.filesDir, "product_photos.pre")
+        val logoPre = File(context.filesDir, "store_media.pre")
+
+        AppDatabase.closeAndClear()
+        try {
+            if (previous.exists()) previous.delete()
+            if (live.exists() && !live.renameTo(previous)) throw IllegalStateException("Gagal mengamankan database lama")
+            wal.delete(); shm.delete()
+
+            val pDir = photoDir(); val lDir = logoDir()
+            photoPre.deleteRecursively(); if (pDir.exists()) if (!pDir.renameTo(photoPre)) throw IllegalStateException("Gagal mengamankan media lama")
+            logoPre.deleteRecursively(); if (lDir.exists()) if (!lDir.renameTo(logoPre)) throw IllegalStateException("Gagal mengamankan media lama")
+
+            if (!content.dbFile.renameTo(live)) throw IllegalStateException("Gagal menerapkan database restore")
+            val stagedPhotos = File(stagingDir, BackupPackage.PHOTO_DIR)
+            val stagedLogos = File(stagingDir, BackupPackage.LOGO_DIR)
+            if (stagedPhotos.exists() && !stagedPhotos.renameTo(pDir)) throw IllegalStateException("Gagal menerapkan foto produk")
+            if (stagedLogos.exists() && !stagedLogos.renameTo(lDir)) throw IllegalStateException("Gagal menerapkan logo toko")
+
+            photoPre.deleteRecursively(); logoPre.deleteRecursively(); previous.delete()
+            stagingDir.deleteRecursively()
+            return BackupResult(true, "Restore berhasil. Data, foto produk, dan logo toko telah dipulihkan.")
+        } catch (e: Exception) {
+            // Rollback: restore previous DB and previous media buckets.
+            live.delete()
+            if (previous.exists()) previous.renameTo(live)
+            photoDir().deleteRecursively()
+            if (photoPre.exists()) photoPre.renameTo(photoDir())
+            logoDir().deleteRecursively()
+            if (logoPre.exists()) logoPre.renameTo(logoDir())
+            stagingDir.deleteRecursively()
+            return BackupResult(false, "Restore gagal dan data lama dikembalikan: ${e.message}")
+        }
+    }
+
+    /**
+     * Rewrites the extracted DB's media paths to point at the CURRENT installation's managed
+     * directories and verifies every referenced basename is actually present in the archive.
+     */
+    private fun rebindMediaPaths(content: BackupPackage.Content, stagingDir: File) {
+        val pDir = photoDir(); val lDir = logoDir()
+        val db = android.database.sqlite.SQLiteDatabase.openDatabase(
+            content.dbFile.absolutePath, null,
+            android.database.sqlite.SQLiteDatabase.OPEN_READWRITE
+        )
+        try {
+            val photoUpdates = mutableListOf<Pair<Long, String>>()
+            db.rawQuery("SELECT id, photo FROM products WHERE photo IS NOT NULL AND photo != ''", null).use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getLong(0)
+                    val base = File(c.getString(1)).name
+                    if (base.isBlank() || !content.photos.containsKey(base)) {
+                        throw BackupPackage.ParseException("Arsip tidak lengkap: foto produk terreferensi hilang")
+                    }
+                    photoUpdates += id to File(pDir, base).absolutePath
                 }
-                wal.delete()
-                shm.delete()
-                if (!staged.renameTo(live)) {
-                    if (previous.exists()) previous.renameTo(live)
-                    return@withMaintenance BackupResult(false, "Gagal menerapkan database restore")
+            }
+            for ((id, newPath) in photoUpdates) {
+                db.execSQL("UPDATE products SET photo=? WHERE id=?", arrayOf(newPath, id))
+            }
+
+            val logoUpdates = mutableListOf<Pair<Long, String>>()
+            db.rawQuery("SELECT id, logo FROM stores WHERE logo IS NOT NULL AND logo != ''", null).use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getLong(0)
+                    val base = File(c.getString(1)).name
+                    if (base.isBlank() || !content.logos.containsKey(base)) {
+                        throw BackupPackage.ParseException("Arsip tidak lengkap: logo toko terreferensi hilang")
+                    }
+                    logoUpdates += id to File(lDir, base).absolutePath
                 }
-                BackupResult(true, "Restore berhasil. Tutup lalu buka kembali aplikasi untuk memakai data baru.")
-            } catch (e: Exception) {
-                staged.delete()
-                BackupResult(false, "Restore gagal: ${e.message}")
             }
+            for ((id, newPath) in logoUpdates) {
+                db.execSQL("UPDATE stores SET logo=? WHERE id=?", arrayOf(newPath, id))
             }
+
+            // Fold WAL into the main file so the rename applies the rewritten paths.
+            db.rawQuery("PRAGMA wal_checkpoint(FULL)", null).use { it.moveToFirst() }
+        } finally {
+            try { db.close() } catch (_: Exception) { }
+            // Drop any sidecar WAL/SHM beside the staged DB.
+            File(content.dbFile.absolutePath + "-wal").delete()
+            File(content.dbFile.absolutePath + "-shm").delete()
         }
     }
 
@@ -178,11 +387,14 @@ class BackupService(private val context: Context) {
                 return "Versi skema backup ($userVersion) tidak kompatibel dengan aplikasi ($CURRENT_SCHEMA_VERSION)"
             }
 
+            // `refund_payments` is only created by migration 2→3: a genuine v1/v2 backup
+            // must not be required to carry it. Everything else exists from v1.
+            val required = if (userVersion < 3) REQUIRED_TABLES.filter { it != "refund_payments" } else REQUIRED_TABLES
             val tableCount = db.rawQuery(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name IN " +
-                    "(${REQUIRED_TABLES.joinToString(",") { "'$it'" }})", null
+                    "(${required.joinToString(",") { "'$it'" }})", null
             ).use { c -> var n = 0; while (c.moveToNext()) n++; n }
-            if (tableCount < REQUIRED_TABLES.size) return "Backup tidak lengkap: tabel inti tidak ditemukan"
+            if (tableCount < required.size) return "Backup tidak lengkap: tabel inti tidak ditemukan"
 
             // For legacy (application_id=0) files, additionally demand Room's own
             // identity marker table to distinguish a real Trapezo DB from a foreign SQLite.
