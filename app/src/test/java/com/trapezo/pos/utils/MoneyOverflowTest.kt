@@ -3,8 +3,24 @@ package com.trapezo.pos.utils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.util.Locale
 
 class MoneyOverflowTest {
+
+    @Test fun rupiahFormatting_usesIndonesianSeparatorRegardlessOfDeviceLocale() {
+        val original = Locale.getDefault()
+        try {
+            // A US-default device previously produced "Rp 28,500"; grouping must stay Indonesian.
+            Locale.setDefault(Locale.US)
+            assertEquals("Rp 28.500", Money.fmt(28_500L))
+            assertEquals("Rp 8.999.000.000", Money.fmt(8_999_000_000L))
+            Locale.setDefault(Locale.GERMANY)
+            assertEquals("Rp 1.234.567", Money.fmt(1_234_567L))
+            assertEquals("Rp 0", Money.fmt(0L))
+        } finally {
+            Locale.setDefault(original)
+        }
+    }
     @Test fun normalInput_parsesToLong() {
         assertEquals(12500L, Money.parseOrNull("12.500"))
         assertEquals(12500L, Money.parseOrNull("Rp 12,500"))

@@ -22,3 +22,6 @@ Thumbs.db
 
 # Tools (audit scripts, not part of app)
 tools/
+
+# Local Track F visual-verification scratch harness (not part of the product)
+tools/
