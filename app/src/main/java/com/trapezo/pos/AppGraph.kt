@@ -10,20 +10,63 @@ import com.trapezo.pos.data.repository.ShiftRepository
 import com.trapezo.pos.data.repository.StoreRepository
 import com.trapezo.pos.data.repository.UserRepository
 
-/** Lightweight manual DI graph; keeps UI independent of Room construction. */
+/**
+ * Lightweight manual DI graph; keeps UI independent of Room construction.
+ *
+ * Getters intentionally do NOT cache Room/repositories: a restore replaces the
+ * database file after AppDatabase.closeAndClear(), and these getters then bind
+ * every subsequent UI action to the newly opened database.
+ *
+ * Each repository getter captures ONE database instance first and constructs every
+ * DAO/repository for that graph node from that one instance. This avoids evaluating
+ * AppDatabase.get() multiple times inside one repository construction, which could
+ * theoretically mix DAOs from different instances if maintenance swaps the singleton
+ * between those evaluations.
+ */
 object AppGraph {
-    /**
-     * Getters intentionally do not cache Room/repositories. A restore replaces the
-     * database file after AppDatabase.closeAndClear(), and these getters then bind
-     * every subsequent UI action to the newly opened database.
-     */
+
+    /** Raw database access (indexed lookup used by a few screens). Not cached. */
     val db: AppDatabase get() = AppDatabase.get()
-    val settings: SettingsRepository get() = SettingsRepository(db)
-    val products: ProductRepository get() = ProductRepository(db, db.productDao(), db.categoryDao(), db.inventoryDao(), settings)
-    val sales: SalesRepository get() = SalesRepository(db, db.saleDao(), settings)
-    val customers: CustomerRepository get() = CustomerRepository(db, db.customerDao(), settings)
-    val refunds: RefundRepository get() = RefundRepository(db)
-    val shifts: ShiftRepository get() = ShiftRepository(db)
-    val store: StoreRepository get() = StoreRepository(db)
-    val users: UserRepository get() = UserRepository(db, db.userDao(), settings)
+
+    val settings: SettingsRepository
+        get() = SettingsRepository(db)
+
+    val products: ProductRepository
+        get() {
+            val database = db
+            return ProductRepository(
+                database,
+                database.productDao(),
+                database.categoryDao(),
+                database.inventoryDao(),
+                SettingsRepository(database)
+            )
+        }
+
+    val sales: SalesRepository
+        get() {
+            val database = db
+            return SalesRepository(database, database.saleDao(), SettingsRepository(database))
+        }
+
+    val customers: CustomerRepository
+        get() {
+            val database = db
+            return CustomerRepository(database, database.customerDao(), SettingsRepository(database))
+        }
+
+    val refunds: RefundRepository
+        get() = RefundRepository(db)
+
+    val shifts: ShiftRepository
+        get() = ShiftRepository(db)
+
+    val store: StoreRepository
+        get() = StoreRepository(db)
+
+    val users: UserRepository
+        get() {
+            val database = db
+            return UserRepository(database, database.userDao(), SettingsRepository(database))
+        }
 }
