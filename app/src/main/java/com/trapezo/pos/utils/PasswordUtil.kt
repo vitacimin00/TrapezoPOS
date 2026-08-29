@@ -20,7 +20,17 @@ import javax.crypto.spec.PBEKeySpec
 object PasswordUtil {
 
     private const val ALGO = "PBKDF2WithHmacSHA256"
-    private const val ITERATIONS = 120_000
+
+    /**
+     * Current work factor. Raised from 120_000 to 600_000 for release hardening (OWASP-aligned
+     * for PBKDF2-HMAC-SHA256).
+     *
+     * Existing records are NOT invalidated: [verify] derives using the iteration count stored in
+     * the record itself, so a valid 120k hash still authenticates. [needsRehash] then reports it
+     * as stale and AuthRepository re-hashes it at the current work factor on successful login.
+     */
+    private const val ITERATIONS = 600_000
+    const val CURRENT_ITERATIONS = ITERATIONS
     private const val KEY_LEN = 256
     private const val MIN_ITERATIONS = 10_000
     private const val MAX_ITERATIONS = 2_000_000
