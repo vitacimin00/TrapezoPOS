@@ -138,4 +138,90 @@ class BackupRoundTripTest {
         corrupt.writeBytes("SQLite format 3\u0000definitely corrupt".toByteArray())
         assertNotNull(BackupService(ctx).validateStaged(corrupt))
     }
+
+    /**
+     * Revision 01 BLOCKER regression.
+     *
+     * Makes the very first apply step — moving the ORIGINAL live DB aside to `.pre_restore` —
+     * fail, by occupying that destination with a NON-EMPTY DIRECTORY (a directory cannot be
+     * replaced by File.renameTo, and a non-empty one cannot be deleted either).
+     *
+     * The original live DB is therefore never moved. Before this revision the rollback ran an
+     * unconditional `live.delete()` and DESTROYED that original database. The rollback must now
+     * recognise it does not own `live` and leave it completely untouched.
+     *
+     * No production fault-injection switch is involved — only real filesystem state.
+     */
+    @Test fun failedRestore_whenOriginalDbCannotBeMovedAside_preservesOriginalDb() = runBlocking {
+        // Known, readable marker row in the ORIGINAL database.
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "rollback.marker", value = "original"))
+
+        // A valid package to restore (contains a different value for the same key).
+        val backup = temp("rollback_src.trpz")
+        assertTrue(BackupService(ctx).backupTo(Uri.fromFile(backup)).ok)
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "rollback.marker", value = "original"))
+
+        val liveDb = ctx.getDatabasePath(AppDatabase.NAME)
+        val liveBytesBefore = liveDb.readBytes().size
+        assertTrue("live DB must exist before restore", liveDb.exists())
+
+        // Occupy the `.pre_restore` destination with a non-empty directory.
+        val blocker = File(liveDb.parentFile, "${AppDatabase.NAME}.pre_restore")
+        blocker.deleteRecursively()
+        assertTrue(blocker.mkdirs())
+        File(blocker, "occupied.txt").writeBytes("blocked".toByteArray())
+
+        try {
+            val result = BackupService(ctx).restoreFrom(Uri.fromFile(backup))
+
+            // 1. The restore must FAIL.
+            assertTrue("restore should have failed, got: ${result.message}", !result.ok)
+
+            // 2. The ORIGINAL live DB must still be there, byte-for-byte.
+            assertTrue("ORIGINAL live DB was destroyed by rollback", liveDb.exists())
+            assertEquals(liveBytesBefore, liveDb.readBytes().size)
+
+            // 3. And it must still be readable with its original row intact.
+            assertEquals("original", AppDatabase.get().settingsDao().get("rollback.marker"))
+        } finally {
+            blocker.deleteRecursively()
+        }
+    }
+
+    /**
+     * Revision 01: when the original product-media directory could not be moved aside, rollback
+     * must not delete it. A read-only-ish conflict is hard to force portably for directories, so
+     * this asserts the safe outcome of the same blocked-DB scenario: media survives untouched.
+     */
+    @Test fun failedRestore_leavesOriginalMediaUntouched() = runBlocking {
+        val photoDir = File(ctx.filesDir, "product_photos").apply { mkdirs() }
+        val logoDir = File(ctx.filesDir, "store_media").apply { mkdirs() }
+        val photo = File(photoDir, "product_keep.jpg").apply { writeBytes("KEEPJPEG".toByteArray()) }
+        val logo = File(logoDir, "store_logo_keep.png").apply { writeBytes("KEEPPNG".toByteArray()) }
+
+        val backup = temp("rollback_media.trpz")
+        val db = AppDatabase.get()
+        db.productDao().insert(ProductEntity(name = "K", sku = "K1", photo = photo.absolutePath))
+        db.storeDao().insert(StoreEntity(name = "Toko", logo = logo.absolutePath))
+        assertTrue(BackupService(ctx).backupTo(Uri.fromFile(backup)).ok)
+
+        val liveDb = ctx.getDatabasePath(AppDatabase.NAME)
+        val blocker = File(liveDb.parentFile, "${AppDatabase.NAME}.pre_restore")
+        blocker.deleteRecursively()
+        assertTrue(blocker.mkdirs())
+        File(blocker, "occupied.txt").writeBytes("blocked".toByteArray())
+
+        try {
+            val result = BackupService(ctx).restoreFrom(Uri.fromFile(backup))
+            assertTrue("restore should have failed", !result.ok)
+
+            // Original media must be intact — never deleted by a rollback that owns nothing.
+            assertTrue("original photo deleted", photo.exists())
+            assertTrue("original logo deleted", logo.exists())
+            assertEquals("KEEPJPEG", String(photo.readBytes()))
+            assertEquals("KEEPPNG", String(logo.readBytes()))
+        } finally {
+            blocker.deleteRecursively()
+        }
+    }
 }

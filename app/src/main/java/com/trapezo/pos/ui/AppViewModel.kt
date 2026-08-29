@@ -109,8 +109,27 @@ class AppViewModel : ViewModel() {
      * Reinitializes authentication after a successful restore. A restored database may
      * contain entirely different users/roles/credentials, so the previous in-memory
      * identity must never be assumed to still represent the same person.
+     *
+     * The previous identity is dropped SYNCHRONOUSLY, before the restored database is read,
+     * so there is never a frame in which the restored DB is active while the old
+     * authenticated user is still authoritative in [SessionState].
      */
     fun forceReauthAfterRestore(message: String? = null) {
-        reinitialize(notice = message ?: "Restore berhasil. Silakan masuk kembali menggunakan akun dari backup.")
+        val notice = message ?: "Restore berhasil. Silakan masuk kembali menggunakan akun dari backup."
+        // Synchronous: user == null the instant reauthentication begins.
+        _session.value = SessionState(user = null, initializing = true, notice = notice)
+        viewModelScope.launch {
+            val hasUsers = AppGraph.users.hasUsers()
+            val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
+            _session.value = SessionState(
+                user = null,
+                initializing = false,
+                needsSetup = !hasUsers || legacyDefault,
+                error = if (legacyDefault) {
+                    "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
+                } else null,
+                notice = notice
+            )
+        }
     }
 }

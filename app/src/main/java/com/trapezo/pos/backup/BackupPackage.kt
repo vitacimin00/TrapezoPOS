@@ -95,25 +95,68 @@ object BackupPackage {
         schemaVersion: Int,
         now: Long
     ) {
+        // Writer bounds MUST mirror the reader's bounds, otherwise Trapezo could produce a
+        // package that Trapezo itself later refuses to restore.
+        val mediaCount = photos.size + logos.size
+        if (mediaCount + 2 > MAX_ENTRIES) {
+            throw BuildException("Jumlah file media melebihi batas arsip backup")
+        }
+        var declaredMediaTotal = 0L
+        for (f in photos + logos) {
+            if (!f.exists() || !f.isFile) {
+                throw BuildException("File yang akan dibackup tidak ditemukan: ${f.name}")
+            }
+            val len = f.length()
+            if (len > MAX_MEDIA_ENTRY_BYTES) {
+                throw BuildException("File media terlalu besar untuk dibackup: ${f.name}")
+            }
+            declaredMediaTotal += len
+            if (declaredMediaTotal > MAX_MEDIA_TOTAL_BYTES) {
+                throw BuildException("Total ukuran media melebihi batas arsip backup")
+            }
+        }
+
         val seen = HashSet<String>()
         ZipOutputStream(BufferedOutputStream(out)).use { zip ->
+            if (!seen.add(MANIFEST_NAME)) throw BuildException("Entri arsip duplikat: $MANIFEST_NAME")
             zip.putNextEntry(ZipEntry(MANIFEST_NAME))
             zip.write(manifestText(schemaVersion, now).toByteArray(Charsets.UTF_8))
             zip.closeEntry()
 
-            fun put(name: String, file: File) {
+            // Enforced again while streaming, in case a file grows between precheck and copy.
+            var writtenMediaTotal = 0L
+
+            fun put(name: String, file: File, media: Boolean) {
                 if (!seen.add(name)) throw BuildException("Entri arsip duplikat: $name")
                 if (!file.exists() || !file.isFile) {
                     throw BuildException("File yang akan dibackup tidak ditemukan: ${file.name}")
                 }
                 zip.putNextEntry(ZipEntry(name))
-                file.inputStream().use { it.copyTo(zip) }
+                var entryTotal = 0L
+                val buf = ByteArray(64 * 1024)
+                file.inputStream().use { input ->
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        entryTotal += n
+                        if (media) {
+                            if (entryTotal > MAX_MEDIA_ENTRY_BYTES) {
+                                throw BuildException("File media terlalu besar untuk dibackup: ${file.name}")
+                            }
+                            if (writtenMediaTotal + entryTotal > MAX_MEDIA_TOTAL_BYTES) {
+                                throw BuildException("Total ukuran media melebihi batas arsip backup")
+                            }
+                        }
+                        zip.write(buf, 0, n)
+                    }
+                }
+                if (media) writtenMediaTotal += entryTotal
                 zip.closeEntry()
             }
 
-            put(DB_ENTRY, dbFile)
-            photos.forEach { put("$PHOTO_DIR/${it.name}", it) }
-            logos.forEach { put("$LOGO_DIR/${it.name}", it) }
+            put(DB_ENTRY, dbFile, media = false)
+            photos.forEach { put("$PHOTO_DIR/${it.name}", it, media = true) }
+            logos.forEach { put("$LOGO_DIR/${it.name}", it, media = true) }
         }
     }
 
@@ -150,6 +193,10 @@ object BackupPackage {
 
         try {
             ZipInputStream(BufferedInputStream(source.inputStream())).use { zip ->
+                // ONE global ledger for EVERY non-directory logical entry, so a duplicate
+                // manifest or database entry can never overwrite the first one
+                // (no ambiguous last-entry-wins behavior).
+                val seenEntries = HashSet<String>()
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     entryCount++
@@ -160,6 +207,11 @@ object BackupPackage {
                     ) {
                         throw ParseException("Entri arsip tidak valid: $name")
                     }
+                    // Directory entries carry no payload and are not part of the contract.
+                    if (entry.isDirectory || name.endsWith("/")) {
+                        throw ParseException("Entri arsip tidak dikenal: $name")
+                    }
+                    if (!seenEntries.add(name)) throw ParseException("Entri arsip duplikat: $name")
                     when {
                         name == MANIFEST_NAME -> {
                             val baos = java.io.ByteArrayOutputStream()

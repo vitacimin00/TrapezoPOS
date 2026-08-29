@@ -193,7 +193,7 @@ fun SettingsScreen(
                 // Replacing an unsaved draft logo: delete the now-unreferenced previous draft.
                 val previousDraft = draft.store.logo
                 if (previousDraft != null && previousDraft != persistedLogo) {
-                    StoreLogoStorage.deleteManaged(previousDraft)
+                    StoreLogoStorage.deleteManaged(context, previousDraft)
                 }
                 draft = draft.copy(store = draft.store.copy(logo = path))
                 feedback?.info("Logo dipilih. Tekan Simpan untuk menerapkannya.")
@@ -209,7 +209,7 @@ fun SettingsScreen(
         onDispose {
             val draftLogo = latestDraftLogo
             if (draftLogo != null && draftLogo != latestPersistedLogo) {
-                StoreLogoStorage.deleteManaged(draftLogo)
+                StoreLogoStorage.deleteManaged(context, draftLogo)
             }
         }
     }
@@ -271,7 +271,7 @@ fun SettingsScreen(
                             // Success: the new logo is now authoritative; retire the old one.
                             val old = persistedLogo
                             if (old != null && old != draft.store.logo) {
-                                StoreLogoStorage.deleteManaged(old)
+                                StoreLogoStorage.deleteManaged(context, old)
                             }
                             persistedLogo = draft.store.logo
                             feedback?.success("Pengaturan toko disimpan")
