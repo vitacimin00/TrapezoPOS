@@ -1,5 +1,6 @@
 package com.trapezo.pos.domain.model
 
+import com.trapezo.pos.utils.toLongExactCompat
 import java.math.BigInteger
 
 /** Immutable-sale refund arithmetic and exact proportional allocation helpers. */
@@ -28,7 +29,7 @@ object RefundRules {
         clean.forEachIndexed { index, weight ->
             val numerator = totalBi * BigInteger.valueOf(weight)
             val parts = numerator.divideAndRemainder(weightSum)
-            val base = parts[0].longValueExact()
+            val base = parts[0].toLongExactCompat()
             bases[index] = base
             remainders[index] = parts[1]
             allocated += base
@@ -68,7 +69,7 @@ object RefundRules {
             BigInteger.valueOf(finalTotal)
                 .multiply(BigInteger.valueOf(newQty))
                 .divide(BigInteger.valueOf(soldQuantity))
-                .longValueExact()
+                .toLongExactCompat()
         }
         return (target - alreadyAmount).coerceAtLeast(0)
     }
