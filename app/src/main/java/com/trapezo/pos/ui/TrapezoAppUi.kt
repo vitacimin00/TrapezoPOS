@@ -1,5 +1,7 @@
 package com.trapezo.pos.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -31,6 +33,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
@@ -42,9 +45,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -52,7 +57,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.trapezo.pos.backup.BackupService
 import com.trapezo.pos.data.entity.UserEntity
+import com.trapezo.pos.ui.components.ConfirmActionDialog
 import com.trapezo.pos.ui.components.LoadingState
 import com.trapezo.pos.ui.components.ProvideFeedback
 import com.trapezo.pos.ui.components.ResponsiveScope
@@ -71,11 +78,17 @@ import com.trapezo.pos.ui.screens.TransactionsScreen
 import com.trapezo.pos.ui.theme.Radius
 import com.trapezo.pos.ui.theme.Space
 import com.trapezo.pos.ui.theme.Touch
+import kotlinx.coroutines.launch
 
 @Composable
 fun TrapezoRoot(vm: AppViewModel = viewModel()) {
     val session by vm.session.collectAsState()
     when {
+        // A database that cannot be opened must never crash or spin forever.
+        session.fatalStartupError != null -> StartupRecoveryScreen(
+            onRetry = vm::retryStartup,
+            onRecovered = vm::reinitializeAfterRecovery
+        )
         session.initializing -> Box(Modifier.fillMaxSize()) { LoadingState("Menyiapkan Trapezo POS…") }
         session.needsSetup -> OwnerSetupScreen(session.loading, session.error, session.notice, vm::setupOwner)
         session.user == null -> LoginScreen(session.loading, session.error, session.notice, vm::login)
@@ -85,6 +98,94 @@ fun TrapezoRoot(vm: AppViewModel = viewModel()) {
             onSessionRefresh = vm::refreshCurrentSession,
             onSessionReauth = vm::forceReauthAfterRestore
         )
+    }
+}
+
+/**
+ * Startup recovery surface, shown when the local database cannot be opened.
+ *
+ * Offers exactly two non-destructive actions: retry, or restore a real Trapezo POS backup
+ * through the real [BackupService] via SAF. There is deliberately NO "erase all data" shortcut
+ * and no destructive migration.
+ */
+@Composable
+private fun StartupRecoveryScreen(
+    onRetry: () -> Unit,
+    onRecovered: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    var pendingUri by remember { mutableStateOf<android.net.Uri?>(null) }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) pendingUri = uri
+    }
+
+    if (pendingUri != null) {
+        val uri = pendingUri!!
+        ConfirmActionDialog(
+            title = "Pulihkan dari file backup?",
+            message = "Data saat ini akan digantikan setelah file backup diverifikasi. " +
+                "Anda diminta masuk kembali menggunakan akun dari backup setelah proses selesai.",
+            confirmLabel = "Pulihkan",
+            tone = Tone.DANGER,
+            onDismiss = { pendingUri = null },
+            onConfirm = {
+                pendingUri = null
+                busy = true
+                failure = null
+                scope.launch {
+                    val result = try {
+                        BackupService(context).restoreFrom(uri)
+                    } catch (t: Throwable) {
+                        BackupService.BackupResult(false, "Restore gagal. File backup tidak dapat diproses.")
+                    }
+                    busy = false
+                    if (result.ok) {
+                        onRecovered("Pemulihan berhasil. Silakan masuk kembali menggunakan akun dari backup.")
+                    } else {
+                        // Stay on the recovery screen and report the real, safe error.
+                        failure = result.message
+                    }
+                }
+            }
+        )
+    }
+
+    AuthSurface {
+        Text(
+            "Data Trapezo POS tidak dapat dibuka",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(Space.sm))
+        Text(
+            "Database lokal tidak dapat dibaca. Anda dapat mencoba lagi atau memulihkan " +
+                "backup Trapezo POS.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        failure?.let {
+            Spacer(Modifier.height(Space.md))
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(Space.lg))
+        Button(
+            onClick = onRetry,
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = Touch.min)
+        ) { Text(if (busy) "Memproses…" else "Coba Lagi") }
+        Spacer(Modifier.height(Space.sm))
+        OutlinedButton(
+            onClick = {
+                failure = null
+                picker.launch(arrayOf("application/zip", "application/octet-stream", "application/x-sqlite3", "*/*"))
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = Touch.min)
+        ) { Text("Pulihkan Backup") }
     }
 }
 

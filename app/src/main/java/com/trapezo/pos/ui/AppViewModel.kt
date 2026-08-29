@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.trapezo.pos.AppGraph
 import com.trapezo.pos.data.entity.UserEntity
 import com.trapezo.pos.data.repository.AuthRepository
+import com.trapezo.pos.data.database.AppDatabase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,7 +17,13 @@ data class SessionState(
     val needsSetup: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
-    val notice: String? = null
+    val notice: String? = null,
+    /**
+     * Set only when the local database could not be opened/read/migrated at startup.
+     * Drives a dedicated recovery surface instead of MainShell/Login. Normal login
+     * validation failures use [error] and are NEVER fatal.
+     */
+    val fatalStartupError: String? = null
 )
 
 class AppViewModel : ViewModel() {
@@ -27,20 +34,50 @@ class AppViewModel : ViewModel() {
         reinitialize()
     }
 
-    /** Re-evaluates whether the app should show setup or login, against the current DB. */
+    /**
+     * Re-evaluates whether the app should show setup or login, against the current DB.
+     *
+     * A failure to open/read/migrate the local database is a FATAL STARTUP condition: the app
+     * must offer recovery rather than crash or spin on the splash forever.
+     */
     private fun reinitialize(notice: String? = null) {
+        _session.value = SessionState(initializing = true, notice = notice)
         viewModelScope.launch {
-            val hasUsers = AppGraph.users.hasUsers()
-            val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
-            _session.value = SessionState(
-                initializing = false,
-                needsSetup = !hasUsers || legacyDefault,
-                error = if (legacyDefault) {
-                    "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
-                } else null,
-                notice = notice
-            )
+            try {
+                val hasUsers = AppGraph.users.hasUsers()
+                val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
+                _session.value = SessionState(
+                    initializing = false,
+                    needsSetup = !hasUsers || legacyDefault,
+                    error = if (legacyDefault) {
+                        "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
+                    } else null,
+                    notice = notice
+                )
+            } catch (t: Throwable) {
+                // Database could not be opened. Never expose a stack trace to the user.
+                _session.value = SessionState(
+                    user = null,
+                    initializing = false,
+                    fatalStartupError = "Database lokal tidak dapat dibaca."
+                )
+            }
         }
+    }
+
+    /** Retry action for the startup recovery surface. */
+    fun retryStartup() {
+        AppDatabase.closeAndClear()
+        reinitialize()
+    }
+
+    /**
+     * Called after a recovery restore succeeded. Rebinds against the restored database and
+     * requires authentication — an old session is never resumed.
+     */
+    fun reinitializeAfterRecovery(message: String? = null) {
+        AppDatabase.closeAndClear()
+        reinitialize(notice = message)
     }
 
     fun login(username: String, password: String) = viewModelScope.launch {
