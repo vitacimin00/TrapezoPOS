@@ -362,7 +362,7 @@ private fun CashMovementSheet(
             OutlinedTextField(
                 value = reason,
                 onValueChange = { reason = it; error = null },
-                label = { Text("Alasan") },
+                label = { Text("Alasan (wajib)") },
                 shape = Radius.field,
                 minLines = 2,
                 modifier = Modifier.fillMaxWidth()
@@ -372,6 +372,7 @@ private fun CashMovementSheet(
                 onClick = {
                     val cash = Money.parseOrNull(amount)
                     if (cash == null || cash <= 0) error = "Jumlah harus lebih besar dari nol"
+                    else if (reason.isBlank()) error = "Alasan wajib diisi"
                     else {
                         saving = true
                         scope.launch {

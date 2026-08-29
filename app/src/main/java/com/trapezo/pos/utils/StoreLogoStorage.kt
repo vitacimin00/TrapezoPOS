@@ -26,4 +26,13 @@ object StoreLogoStorage {
     } catch (_: Exception) {
         null
     }
+
+    /** Best-effort deletion of a managed store-logo file (only files under store_media). */
+    fun deleteManaged(path: String?) {
+        if (path.isNullOrBlank()) return
+        val f = File(path)
+        try {
+            if (f.exists() && f.name.startsWith("store_logo_") && f.parentFile?.name == "store_media") f.delete()
+        } catch (_: Exception) { }
+    }
 }

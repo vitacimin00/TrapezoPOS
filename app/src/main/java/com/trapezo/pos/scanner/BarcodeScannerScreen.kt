@@ -63,7 +63,6 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
     } else {
         val lifecycleOwner = LocalLifecycleOwner.current
         val previewView = remember { PreviewView(context).also { it.scaleType = PreviewView.ScaleType.FILL_CENTER } }
-        val scanner = remember { BarcodeScanning.getClient() }
         val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
         var consumed by remember { mutableStateOf(false) }
         var bindError by remember { mutableStateOf<String?>(null) }
@@ -71,6 +70,11 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
 
         DisposableEffect(lifecycleOwner, retryKey) {
             bindError = null
+            consumed = false
+            // Each bind/retry lifecycle owns a fresh ML Kit client. A retry disposes this
+            // effect (closing this client below) and re-enters with a brand new one, so a
+            // "COBA LAGI" never reuses a scanner that was already closed.
+            val scanner = BarcodeScanning.getClient()
             val providerFuture = ProcessCameraProvider.getInstance(context)
             val listener = Runnable {
                 try {
@@ -102,8 +106,6 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
             onDispose {
                 try { providerFuture.get().unbindAll() } catch (_: Exception) { }
                 scanner.close()
-                // Explicitly reset torch-capability assumption on exit; the next session
-                // re-detects from the fresh camera binding rather than inheriting state.
             }
         }
 
