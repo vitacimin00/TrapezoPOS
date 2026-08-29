@@ -307,6 +307,9 @@ class SalesRepository(
     }
 
     suspend fun rangeTotals(from: Long, to: Long) = withContext(Dispatchers.IO) { saleDao.totalsBetween(from, to) }
+    /** Read-only gross/refund split of the same window; net is still gross - refund. */
+    suspend fun rangeGrossAndRefund(from: Long, to: Long) =
+        withContext(Dispatchers.IO) { saleDao.grossAndRefundBetween(from, to) }
     suspend fun methodBreakdown(from: Long, to: Long) = withContext(Dispatchers.IO) { saleDao.totalsByMethod(from, to) }
     suspend fun topProducts(from: Long, to: Long, limit: Int = 10) = withContext(Dispatchers.IO) { saleDao.topProducts(from, to, limit) }
     suspend fun cashierPerformance(from: Long, to: Long) = withContext(Dispatchers.IO) { saleDao.totalsByCashier(from, to) }
