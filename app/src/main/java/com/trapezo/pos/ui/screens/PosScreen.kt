@@ -3,6 +3,8 @@ package com.trapezo.pos.ui.screens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -620,10 +622,14 @@ private fun CartPane(
     onDiscount: () -> Unit,
     onPay: () -> Unit
 ) {
-    val animatedTotal by animateFloatAsState(
-        targetValue = totals.grandTotal.toFloat(),
+    // The grand total is rendered from the exact Long and never interpolated: a 32-bit
+    // float holds only ~7 significant digits, so animating the NUMBER would display
+    // Rp 123.456.789 as Rp 123.456.792. Only the emphasis animates instead, so the
+    // total still visibly reacts to cart changes while every digit stays exact.
+    val totalEmphasis by animateFloatAsState(
+        targetValue = if (cart.isEmpty()) 0f else 1f,
         animationSpec = tween(220),
-        label = "grandTotal"
+        label = "totalEmphasis"
     )
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLow)) {
         Row(
@@ -674,7 +680,19 @@ private fun CartPane(
             if (totals.tax > 0) AmountRow("Pajak", totals.tax)
             if (totals.serviceCharge > 0) AmountRow("Service charge", totals.serviceCharge)
             HorizontalDivider(Modifier.padding(vertical = Space.xs), color = MaterialTheme.colorScheme.outlineVariant)
-            AmountRow("TOTAL", animatedTotal.toLong(), emphasize = true)
+            // Exact Long amount; only the surrounding emphasis is animated.
+            AmountRow(
+                "TOTAL",
+                totals.grandTotal,
+                emphasize = true,
+                modifier = Modifier.graphicsLayer {
+                    // Subtle lift as the cart becomes payable; never touches the digits.
+                    val scale = 0.98f + 0.02f * totalEmphasis
+                    scaleX = scale
+                    scaleY = scale
+                    transformOrigin = TransformOrigin(1f, 0.5f)
+                }
+            )
             Spacer(Modifier.height(Space.xs))
             Button(
                 onClick = onPay,
