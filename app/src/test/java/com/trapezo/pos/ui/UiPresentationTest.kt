@@ -92,6 +92,31 @@ class UiPresentationTest {
     @Test fun quickCashAmounts_areEmptyWhenNothingRemains() {
         assertTrue(quickCashAmountsForTest(0L).isEmpty())
     }
+
+    /**
+     * Guards the "no floating-point money" rule at the presentation layer. The POS cart
+     * total was briefly animated with `animateFloatAsState`, which silently corrupted
+     * large amounts because a 32-bit float carries only ~7 significant digits.
+     */
+    @Test fun rupiahAmounts_survivePresentationExactlyAtBusinessScale() {
+        val amounts = listOf(
+            28_500L, 16_777_217L, 123_456_789L, 999_999_999L,
+            8_999_000_000L, com.trapezo.pos.utils.Money.MAX_RUPIAH
+        )
+        for (amount in amounts) {
+            // A float round-trip is what the bug did; prove we no longer rely on it.
+            val viaFloat = amount.toFloat().toLong()
+            val rendered = com.trapezo.pos.utils.Money.fmt(amount)
+            val digits = rendered.removePrefix("Rp ").replace(".", "").toLong()
+            assertEquals("formatting must preserve $amount exactly", amount, digits)
+            if (amount > 16_777_216L) {
+                assertTrue(
+                    "test fixture must actually exercise float imprecision for $amount",
+                    viaFloat != amount
+                )
+            }
+        }
+    }
 }
 
 /** Bridge to the POS screen's internal helper so it stays testable without Compose. */
