@@ -264,43 +264,141 @@ class BackupService(private val context: Context) {
             return BackupResult(false, e.message ?: "Arsip backup tidak lengkap")
         }
 
-        // Apply with rollback across DB + both media buckets.
+        // Apply with STATE-AWARE rollback across DB + both media buckets.
         val parent = live.parentFile ?: run { stagingDir.deleteRecursively(); return BackupResult(false, "Folder database tidak tersedia") }
         val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
         val wal = File(parent, "${AppDatabase.NAME}-wal")
         val shm = File(parent, "${AppDatabase.NAME}-shm")
         val photoPre = File(context.filesDir, "product_photos.pre")
         val logoPre = File(context.filesDir, "store_media.pre")
+        val pDir = photoDir()
+        val lDir = logoDir()
+
+        // Ownership ledger: rollback may only remove a live resource that we KNOW is the
+        // staged-new copy, and may only report recovery when a previously secured copy was
+        // actually put back. A resource that was never moved is still the ORIGINAL and must
+        // never be deleted during rollback.
+        val state = ApplyState(live, previous, pDir, photoPre, lDir, logoPre)
 
         AppDatabase.closeAndClear()
         try {
-            if (previous.exists()) previous.delete()
-            if (live.exists() && !live.renameTo(previous)) throw IllegalStateException("Gagal mengamankan database lama")
+            if (previous.exists() && !previous.delete()) {
+                throw IllegalStateException("Gagal membersihkan cadangan database sebelumnya")
+            }
+            if (live.exists()) {
+                if (!live.renameTo(previous)) throw IllegalStateException("Gagal mengamankan database lama")
+                state.dbBackedUp = true
+            }
             wal.delete(); shm.delete()
 
-            val pDir = photoDir(); val lDir = logoDir()
-            photoPre.deleteRecursively(); if (pDir.exists()) if (!pDir.renameTo(photoPre)) throw IllegalStateException("Gagal mengamankan media lama")
-            logoPre.deleteRecursively(); if (lDir.exists()) if (!lDir.renameTo(logoPre)) throw IllegalStateException("Gagal mengamankan media lama")
+            photoPre.deleteRecursively()
+            if (pDir.exists()) {
+                if (!pDir.renameTo(photoPre)) throw IllegalStateException("Gagal mengamankan foto produk lama")
+                state.photoBackedUp = true
+            }
+            logoPre.deleteRecursively()
+            if (lDir.exists()) {
+                if (!lDir.renameTo(logoPre)) throw IllegalStateException("Gagal mengamankan logo toko lama")
+                state.logoBackedUp = true
+            }
 
             if (!content.dbFile.renameTo(live)) throw IllegalStateException("Gagal menerapkan database restore")
+            state.newDbApplied = true
+
             val stagedPhotos = File(stagingDir, BackupPackage.PHOTO_DIR)
             val stagedLogos = File(stagingDir, BackupPackage.LOGO_DIR)
-            if (stagedPhotos.exists() && !stagedPhotos.renameTo(pDir)) throw IllegalStateException("Gagal menerapkan foto produk")
-            if (stagedLogos.exists() && !stagedLogos.renameTo(lDir)) throw IllegalStateException("Gagal menerapkan logo toko")
+            if (stagedPhotos.exists()) {
+                if (!stagedPhotos.renameTo(pDir)) throw IllegalStateException("Gagal menerapkan foto produk")
+                state.newPhotosApplied = true
+            }
+            if (stagedLogos.exists()) {
+                if (!stagedLogos.renameTo(lDir)) throw IllegalStateException("Gagal menerapkan logo toko")
+                state.newLogosApplied = true
+            }
 
             photoPre.deleteRecursively(); logoPre.deleteRecursively(); previous.delete()
             stagingDir.deleteRecursively()
             return BackupResult(true, "Restore berhasil. Data, foto produk, dan logo toko telah dipulihkan.")
         } catch (e: Exception) {
-            // Rollback: restore previous DB and previous media buckets.
-            live.delete()
-            if (previous.exists()) previous.renameTo(live)
-            photoDir().deleteRecursively()
-            if (photoPre.exists()) photoPre.renameTo(photoDir())
-            logoDir().deleteRecursively()
-            if (logoPre.exists()) logoPre.renameTo(logoDir())
+            val unrecovered = state.rollback()
             stagingDir.deleteRecursively()
-            return BackupResult(false, "Restore gagal dan data lama dikembalikan: ${e.message}")
+            return if (unrecovered.isEmpty()) {
+                BackupResult(false, "Restore gagal dan data lama dikembalikan: ${e.message}")
+            } else {
+                // NEVER claim a successful rollback when a rename-back actually failed.
+                BackupResult(
+                    false,
+                    "Restore gagal dan pemulihan data lama tidak selesai. Jangan gunakan aplikasi " +
+                        "sampai data diperiksa. (${unrecovered.joinToString("; ")})"
+                )
+            }
+        }
+    }
+
+    /**
+     * Ownership ledger for the restore apply phase.
+     *
+     * Invariant: never delete anything unless we know it is the staged-new copy, or we hold a
+     * verified previous copy available to restore. A resource whose "secure the original" move
+     * never succeeded is still the original and is left strictly untouched.
+     */
+    private class ApplyState(
+        private val live: File,
+        private val previous: File,
+        private val photoDir: File,
+        private val photoPre: File,
+        private val logoDir: File,
+        private val logoPre: File
+    ) {
+        /** True only when the ORIGINAL db was successfully moved aside to [previous]. */
+        var dbBackedUp = false
+        /** True only when the ORIGINAL product photos were successfully moved to [photoPre]. */
+        var photoBackedUp = false
+        /** True only when the ORIGINAL store media were successfully moved to [logoPre]. */
+        var logoBackedUp = false
+        /** True only when the staged-new db now occupies [live]. */
+        var newDbApplied = false
+        /** True only when staged-new photos now occupy [photoDir]. */
+        var newPhotosApplied = false
+        /** True only when staged-new store media now occupy [logoDir]. */
+        var newLogosApplied = false
+
+        /** Rolls back what we own. Returns descriptions of anything that could NOT be recovered. */
+        fun rollback(): List<String> {
+            val failed = mutableListOf<String>()
+
+            // ---- database ----
+            if (newDbApplied && live.exists() && !live.delete()) {
+                failed += "database hasil restore tidak dapat dihapus"
+            }
+            if (dbBackedUp) {
+                if (live.exists() || !previous.renameTo(live)) {
+                    failed += "database lama tidak dapat dikembalikan"
+                }
+            }
+            // !dbBackedUp && !newDbApplied -> `live` was never moved: it IS the original. Leave it.
+
+            // ---- product photos ----
+            if (newPhotosApplied && photoDir.exists() && !photoDir.deleteRecursively()) {
+                failed += "foto produk hasil restore tidak dapat dihapus"
+            }
+            if (photoBackedUp) {
+                if (photoDir.exists() || !photoPre.renameTo(photoDir)) {
+                    failed += "foto produk lama tidak dapat dikembalikan"
+                }
+            }
+
+            // ---- store media ----
+            if (newLogosApplied && logoDir.exists() && !logoDir.deleteRecursively()) {
+                failed += "logo toko hasil restore tidak dapat dihapus"
+            }
+            if (logoBackedUp) {
+                if (logoDir.exists() || !logoPre.renameTo(logoDir)) {
+                    failed += "logo toko lama tidak dapat dikembalikan"
+                }
+            }
+
+            return failed
         }
     }
 

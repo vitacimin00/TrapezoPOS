@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.trapezo.pos.ui.AppViewModel
 import com.trapezo.pos.backup.BackupService
 import com.trapezo.pos.data.database.AppDatabase
 import com.trapezo.pos.data.repository.ShiftRepository
@@ -183,5 +184,37 @@ class G3PreprodTest {
         assertEquals("80mm", settings.raw("receipt.paper"))
         assertEquals("Kaki Baru", settings.raw("receipt.footer"))
         db.close()
+    }
+
+    // ---- Revision 01: restore reauth must clear the session synchronously ----
+
+    /**
+     * Proves the previous identity is dropped in the SAME call frame as
+     * [AppViewModel.forceReauthAfterRestore] — before the suspending re-read of the restored
+     * database can complete.
+     *
+     * There must never be a frame where the restored DB is live while the previously
+     * authenticated user is still authoritative in SessionState.
+     */
+    @Test fun forceReauthAfterRestore_clearsUserSynchronously() {
+        AppDatabase.closeAndClear()
+        context.deleteDatabase(AppDatabase.NAME)
+        try {
+            val seeded = runBlocking {
+                AppGraph.users.bootstrapAdmin("rev01admin", "Rev01 Admin", "Password123")
+            }
+            assertNull(seeded.error)
+
+            val vm = AppViewModel()
+            runBlocking { vm.login("rev01admin", "Password123").join() }
+            assertNotNull("precondition: session must hold a user", vm.session.value.user)
+
+            // Synchronous assertion: user is already null the moment the call returns.
+            vm.forceReauthAfterRestore("Restore berhasil.")
+            assertNull("stale identity survived forceReauthAfterRestore", vm.session.value.user)
+        } finally {
+            AppDatabase.closeAndClear()
+            context.deleteDatabase(AppDatabase.NAME)
+        }
     }
 }

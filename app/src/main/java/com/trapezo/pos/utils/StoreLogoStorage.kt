@@ -27,12 +27,28 @@ object StoreLogoStorage {
         null
     }
 
-    /** Best-effort deletion of a managed store-logo file (only files under store_media). */
-    fun deleteManaged(path: String?) {
+    /**
+     * Best-effort deletion of a managed store-logo file.
+     *
+     * Only a DIRECT child of this installation's canonical `filesDir/store_media` whose name
+     * starts with `store_logo_` may be deleted. A crafted path such as
+     * `/some/other/place/store_media/store_logo_x.png` — or one using symlinks/`..` to escape —
+     * is rejected, because containment is decided by comparing canonical parents, not directory
+     * names.
+     */
+    fun deleteManaged(context: Context, path: String?) {
         if (path.isNullOrBlank()) return
-        val f = File(path)
         try {
-            if (f.exists() && f.name.startsWith("store_logo_") && f.parentFile?.name == "store_media") f.delete()
+            val root = File(context.filesDir, "store_media").canonicalFile
+            val target = File(path).canonicalFile
+            if (isManagedLogo(root, target) && target.exists() && target.isFile) target.delete()
         } catch (_: Exception) { }
     }
+
+    /**
+     * Pure path classifier: true only when [target] is a direct managed logo child of the
+     * canonical [root]. Both arguments must already be canonical. Exposed for tests.
+     */
+    fun isManagedLogo(root: File, target: File): Boolean =
+        target.parentFile == root && target.name.startsWith("store_logo_")
 }
