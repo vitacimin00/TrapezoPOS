@@ -42,6 +42,87 @@ class SettingsRepository(private val db: AppDatabase) {
     /** Admin-only numeric configuration write. */
     suspend fun putLongSetting(key: String, v: Long, actorId: Long) = putSetting(key, v.toString(), actorId)
 
+    /**
+     * Writes the POS configuration as one atomic unit. Every key commits together or
+     * none does — a failure mid-sequence must not leave a partial configuration.
+     * Returns null on success or a user-facing error message.
+     */
+    suspend fun savePosConfiguration(
+        invoicePrefix: String,
+        taxPercent: Long,
+        servicePercent: Long,
+        roundingStep: Long,
+        actorId: Long
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            db.withTransaction {
+                Authorization.requireActiveAdmin(db, actorId)
+                if (taxPercent < 0 || taxPercent > 100) throw IllegalArgumentException("Pajak harus 0–100%")
+                if (servicePercent < 0 || servicePercent > 100) throw IllegalArgumentException("Service charge harus 0–100%")
+                if (roundingStep < 0) throw IllegalArgumentException("Pembulatan tidak valid")
+                val prefix = invoicePrefix.trim().ifBlank { "INV" }
+                putTxn("pos.invoice_prefix", prefix)
+                putTxn("pos.tax_percent", taxPercent.toString())
+                putTxn("pos.service_percent", servicePercent.toString())
+                putTxn("pos.rounding", roundingStep.toString())
+                dao.insertAudit(
+                    AuditLogEntity(
+                        userId = actorId,
+                        action = "SETTINGS_POS",
+                        referenceType = "settings",
+                        description = "pos",
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            null
+        } catch (e: Exception) {
+            e.message ?: "Gagal menyimpan pengaturan kasir"
+        }
+    }
+
+    /**
+     * Writes the receipt configuration as one atomic unit. All keys commit together or
+     * none does. Returns null on success or a user-facing error message.
+     */
+    suspend fun saveReceiptConfiguration(
+        paper: String,
+        footer: String,
+        showLogo: Boolean,
+        showAddress: Boolean,
+        showPhone: Boolean,
+        actorId: Long
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            db.withTransaction {
+                Authorization.requireActiveAdmin(db, actorId)
+                val paperDigits = paper.filter { it.isDigit() }.ifBlank { "80" }
+                putTxn("receipt.paper", "${paperDigits}mm")
+                putTxn("receipt.footer", footer)
+                putTxn("receipt.show_logo", if (showLogo) "1" else "0")
+                putTxn("receipt.show_address", if (showAddress) "1" else "0")
+                putTxn("receipt.show_phone", if (showPhone) "1" else "0")
+                dao.insertAudit(
+                    AuditLogEntity(
+                        userId = actorId,
+                        action = "SETTINGS_RECEIPT",
+                        referenceType = "settings",
+                        description = "receipt",
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            null
+        } catch (e: Exception) {
+            e.message ?: "Gagal menyimpan pengaturan struk"
+        }
+    }
+
+    /** Adds/removes a setting key directly inside the caller's open transaction. */
+    private suspend fun putTxn(key: String, value: String) {
+        if (value.isEmpty()) dao.remove(key) else dao.put(SettingEntity(key = key, value = value))
+    }
+
     /** Admin-only payment-method enable/disable. Historical payment rows remain untouched. */
     suspend fun setPaymentMethodActive(type: String, active: Boolean, actorId: Long): String? = withContext(Dispatchers.IO) {
         try {

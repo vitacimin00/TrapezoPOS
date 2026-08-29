@@ -61,6 +61,7 @@ class ShiftRepository(private val db: AppDatabase) {
             if (amount <= 0) return@withContext Result.Error("Nominal harus lebih besar dari 0")
             if (amount > com.trapezo.pos.utils.Money.MAX_RUPIAH) return@withContext Result.Error("Nominal melebihi batas nilai operasional")
             if (type !in setOf("CASH_IN", "CASH_OUT")) return@withContext Result.Error("Tipe cash movement tidak valid")
+            if (note.isBlank()) return@withContext Result.Error("Alasan wajib diisi")
             try {
                 var updated: ShiftEntity? = null
                 db.withTransaction {
