@@ -25,6 +25,92 @@ class MigrationTest {
         names.forEach { context.deleteDatabase(it) }
     }
 
+    private fun copyTable(
+        db: SQLiteDatabase,
+        table: String,
+        createCopy: String,
+        columns: String,
+        indexes: List<String>
+    ) {
+        val copy = "${table}_fixture_copy"
+        db.execSQL("DROP TABLE IF EXISTS `$copy`")
+        db.execSQL(createCopy)
+        db.execSQL("INSERT INTO `$copy` ($columns) SELECT $columns FROM `$table`")
+        db.execSQL("DROP TABLE `$table`")
+        db.execSQL("ALTER TABLE `$copy` RENAME TO `$table`")
+        indexes.forEach(db::execSQL)
+    }
+
+    private fun reverseV5(db: SQLiteDatabase) = copyTable(
+        db,
+        table = "shifts",
+        createCopy = """CREATE TABLE `shifts_fixture_copy` (
+            `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            `userId` INTEGER NOT NULL, `userNameSnapshot` TEXT NOT NULL,
+            `openingCash` INTEGER NOT NULL, `totalCashSales` INTEGER NOT NULL,
+            `totalNonCashSales` INTEGER NOT NULL, `cashIn` INTEGER NOT NULL,
+            `cashOut` INTEGER NOT NULL, `expectedCash` INTEGER NOT NULL,
+            `actualCash` INTEGER NOT NULL, `difference` INTEGER NOT NULL,
+            `openedAt` INTEGER NOT NULL, `closedAt` INTEGER, `status` TEXT NOT NULL
+        )""".trimIndent(),
+        columns = "`id`, `userId`, `userNameSnapshot`, `openingCash`, `totalCashSales`, " +
+            "`totalNonCashSales`, `cashIn`, `cashOut`, `expectedCash`, `actualCash`, " +
+            "`difference`, `openedAt`, `closedAt`, `status`",
+        indexes = listOf(
+            "CREATE INDEX `index_shifts_userId` ON `shifts` (`userId`)",
+            "CREATE INDEX `index_shifts_status` ON `shifts` (`status`)",
+            "CREATE INDEX `index_shifts_openedAt` ON `shifts` (`openedAt`)"
+        )
+    )
+
+    private fun reverseV4(db: SQLiteDatabase) = copyTable(
+        db,
+        table = "users",
+        createCopy = """CREATE TABLE `users_fixture_copy` (
+            `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            `username` TEXT NOT NULL, `passwordHash` TEXT NOT NULL,
+            `name` TEXT NOT NULL, `role` TEXT NOT NULL, `isActive` INTEGER NOT NULL,
+            `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL
+        )""".trimIndent(),
+        columns = "`id`, `username`, `passwordHash`, `name`, `role`, `isActive`, `createdAt`, `updatedAt`",
+        indexes = listOf("CREATE UNIQUE INDEX `index_users_username` ON `users` (`username`)")
+    )
+
+    private fun reverseV3(db: SQLiteDatabase) {
+        db.execSQL("DROP TABLE `refund_payments`")
+        copyTable(
+            db,
+            table = "refunds",
+            createCopy = """CREATE TABLE `refunds_fixture_copy` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `saleId` INTEGER NOT NULL, `userId` INTEGER NOT NULL,
+                `total` INTEGER NOT NULL, `reason` TEXT NOT NULL, `createdAt` INTEGER NOT NULL,
+                FOREIGN KEY(`saleId`) REFERENCES `sales`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+            )""".trimIndent(),
+            columns = "`id`, `saleId`, `userId`, `total`, `reason`, `createdAt`",
+            indexes = listOf("CREATE INDEX `index_refunds_saleId` ON `refunds` (`saleId`)")
+        )
+        copyTable(
+            db,
+            table = "sale_items",
+            createCopy = """CREATE TABLE `sale_items_fixture_copy` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `saleId` INTEGER NOT NULL, `productId` INTEGER,
+                `productNameSnapshot` TEXT NOT NULL, `barcodeSnapshot` TEXT NOT NULL,
+                `quantity` INTEGER NOT NULL, `unitPrice` INTEGER NOT NULL,
+                `discount` INTEGER NOT NULL, `subtotal` INTEGER NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                FOREIGN KEY(`saleId`) REFERENCES `sales`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+            )""".trimIndent(),
+            columns = "`id`, `saleId`, `productId`, `productNameSnapshot`, `barcodeSnapshot`, " +
+                "`quantity`, `unitPrice`, `discount`, `subtotal`, `createdAt`",
+            indexes = listOf(
+                "CREATE INDEX `index_sale_items_saleId` ON `sale_items` (`saleId`)",
+                "CREATE INDEX `index_sale_items_productId` ON `sale_items` (`productId`)"
+            )
+        )
+    }
+
     /** Creates Room's v5 schema, then reverses only the known migration deltas. */
     private fun fixture(name: String, version: Int, seed: (SQLiteDatabase) -> Unit = {}): String {
         names += name
@@ -34,23 +120,24 @@ class MigrationTest {
         current.close()
         val path = context.getDatabasePath(name).absolutePath
         SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
-            if (version < 5) {
-                db.execSQL("DROP INDEX IF EXISTS index_shifts_openGuard")
-                db.execSQL("ALTER TABLE shifts DROP COLUMN openGuard")
+            val foreignKeysEnabled = db.rawQuery("PRAGMA foreign_keys", null).use { c ->
+                c.moveToFirst() && c.getInt(0) != 0
             }
-            if (version < 4) {
-                db.execSQL("ALTER TABLE users DROP COLUMN lockedUntil")
-                db.execSQL("ALTER TABLE users DROP COLUMN failedLoginCount")
+            if (foreignKeysEnabled) db.execSQL("PRAGMA foreign_keys=OFF")
+            try {
+                db.beginTransaction()
+                try {
+                    if (version < 5) reverseV5(db)
+                    if (version < 4) reverseV4(db)
+                    if (version < 3) reverseV3(db)
+                    if (version < 2) db.execSQL("DROP INDEX IF EXISTS `index_sales_transactionStatus_createdAt`")
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            } finally {
+                if (foreignKeysEnabled) db.execSQL("PRAGMA foreign_keys=ON")
             }
-            if (version < 3) {
-                db.execSQL("DROP INDEX IF EXISTS index_refund_payments_method")
-                db.execSQL("DROP INDEX IF EXISTS index_refund_payments_refundId")
-                db.execSQL("DROP TABLE refund_payments")
-                db.execSQL("DROP INDEX IF EXISTS index_refunds_shiftId")
-                db.execSQL("ALTER TABLE refunds DROP COLUMN shiftId")
-                db.execSQL("ALTER TABLE sale_items DROP COLUMN netTotal")
-            }
-            if (version < 2) db.execSQL("DROP INDEX IF EXISTS index_sales_transactionStatus_createdAt")
             seed(db)
             db.version = version
         }

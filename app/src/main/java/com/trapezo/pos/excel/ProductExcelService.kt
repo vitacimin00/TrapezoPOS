@@ -109,9 +109,10 @@ class ProductExcelService(private val db: AppDatabase) {
                 val v = row.values
                 var barcode = v["barcode"].orEmpty()
                 var sku = v["sku"].orEmpty()
+                var generateNewSku = sku.isBlank()
                 val barcodeMatch = barcode.takeIf { it.isNotBlank() }?.let { products.byBarcode(it) }
                 val skuMatch = sku.takeIf { it.isNotBlank() }?.let { products.bySku(it) }
-                if (barcodeMatch != null && skuMatch != null && barcodeMatch.id != skuMatch.id) {
+                if (barcodeMatch != null && skuMatch != null && barcodeMatch.id != skuMatch.id && duplicatePolicy != DuplicatePolicy.CREATE_NEW) {
                     throw IllegalArgumentException("Barcode dan SKU menunjuk ke dua produk berbeda")
                 }
                 var targetExisting = barcodeMatch ?: skuMatch
@@ -122,7 +123,7 @@ class ProductExcelService(private val db: AppDatabase) {
                     val notes = mutableListOf<String>()
                     // SKU reservation happens inside the write transaction below, so a
                     // manual product create cannot steal the same sequence concurrently.
-                    if (skuMatch != null || sku.isBlank()) { notes += "SKU baru" }
+                    if (skuMatch != null || sku.isBlank()) { generateNewSku = true; notes += "SKU baru" }
                     if (barcodeMatch != null) { barcode = ""; notes += "barcode dikosongkan" }
                     targetExisting = null
                     messages += "Baris ${row.excelRow}: produk baru dibuat (${notes.joinToString()})"
@@ -201,9 +202,13 @@ class ProductExcelService(private val db: AppDatabase) {
                             categoryPolicy == MissingCategoryPolicy.CREATE_AUTOMATICALLY -> categories.insert(CategoryEntity(name = categoryName))
                             else -> categories.byName("Lainnya")?.id ?: categories.insert(CategoryEntity(name = "Lainnya"))
                         }
+                        val initialStock = if (base.trackInventory) base.stockQty else 0L
                         val prepared = base.copy(
                             categoryId = categoryId,
-                            sku = base.sku.ifBlank { nextSku() }
+                            sku = if (generateNewSku) nextSku() else base.sku,
+                            // Track C invariant: the product row is inserted at zero; stock
+                            // becomes visible only together with its one matching movement.
+                            stockQty = if (base.trackInventory) 0L else base.stockQty
                         )
                         if (prepared.barcode.isNotBlank() && products.barcodeTaken(prepared.barcode, 0) > 0) {
                             throw IllegalArgumentException("Barcode sudah dipakai produk lain")
@@ -212,9 +217,10 @@ class ProductExcelService(private val db: AppDatabase) {
                             throw IllegalArgumentException("SKU sudah dipakai produk lain")
                         }
                         val newId = products.insert(prepared)
-                        if (prepared.trackInventory && prepared.stockQty != 0L) {
+                        if (prepared.trackInventory && initialStock != 0L) {
+                            products.setQty(newId, initialStock)
                             db.inventoryDao().insert(
-                                InventoryMovementEntity(productId = newId, type = "IMPORT", quantity = prepared.stockQty, note = "Import Excel", userId = userId)
+                                InventoryMovementEntity(productId = newId, type = "IMPORT", quantity = initialStock, note = "Import Excel", userId = userId)
                             )
                         }
                     }
