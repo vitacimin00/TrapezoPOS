@@ -6,6 +6,7 @@ import com.trapezo.pos.AppGraph
 import com.trapezo.pos.data.entity.UserEntity
 import com.trapezo.pos.data.repository.AuthRepository
 import com.trapezo.pos.data.database.AppDatabase
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,26 +43,44 @@ class AppViewModel : ViewModel() {
      */
     private fun reinitialize(notice: String? = null) {
         _session.value = SessionState(initializing = true, notice = notice)
-        viewModelScope.launch {
-            try {
-                val hasUsers = AppGraph.users.hasUsers()
-                val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
-                _session.value = SessionState(
-                    initializing = false,
-                    needsSetup = !hasUsers || legacyDefault,
-                    error = if (legacyDefault) {
-                        "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
-                    } else null,
-                    notice = notice
-                )
-            } catch (t: Throwable) {
-                // Database could not be opened. Never expose a stack trace to the user.
-                _session.value = SessionState(
-                    user = null,
-                    initializing = false,
-                    fatalStartupError = "Database lokal tidak dapat dibaca."
-                )
-            }
+        viewModelScope.launch { runGuardedInitialization(notice) }
+    }
+
+    /**
+     * The ONE guarded database-initialization step, shared by first startup, retry, recovery and
+     * post-restore reauthentication.
+     *
+     * Contract:
+     *  - success            -> setup/login state derived from the authoritative DB
+     *  - CancellationException -> rethrown, never converted into a fatal startup error
+     *  - Exception          -> fatal startup recovery state (no stack trace shown to the user)
+     *  - Error (OOM, LinkageError, ...) -> NOT caught; those are not "database unreadable"
+     *
+     * The caller is responsible for having already published `initializing = true` and, for the
+     * post-restore path, for having cleared the previous session user synchronously.
+     */
+    private suspend fun runGuardedInitialization(notice: String?) {
+        try {
+            val hasUsers = AppGraph.users.hasUsers()
+            val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
+            _session.value = SessionState(
+                initializing = false,
+                needsSetup = !hasUsers || legacyDefault,
+                error = if (legacyDefault) {
+                    "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
+                } else null,
+                notice = notice
+            )
+        } catch (e: CancellationException) {
+            // Structured concurrency: never swallow cancellation.
+            throw e
+        } catch (e: Exception) {
+            // Database could not be opened. Never expose a stack trace to the user.
+            _session.value = SessionState(
+                user = null,
+                initializing = false,
+                fatalStartupError = "Database lokal tidak dapat dibaca."
+            )
         }
     }
 
@@ -153,20 +172,14 @@ class AppViewModel : ViewModel() {
      */
     fun forceReauthAfterRestore(message: String? = null) {
         val notice = message ?: "Restore berhasil. Silakan masuk kembali menggunakan akun dari backup."
-        // Synchronous: user == null the instant reauthentication begins.
+        // Synchronous: user == null the instant reauthentication begins. This must happen before
+        // any restored-database access, so there is never a frame where the restored DB is live
+        // while the previous authenticated identity is still authoritative.
         _session.value = SessionState(user = null, initializing = true, notice = notice)
-        viewModelScope.launch {
-            val hasUsers = AppGraph.users.hasUsers()
-            val legacyDefault = hasUsers && AppGraph.users.requiresLegacyDefaultReset()
-            _session.value = SessionState(
-                user = null,
-                initializing = false,
-                needsSetup = !hasUsers || legacyDefault,
-                error = if (legacyDefault) {
-                    "Akun default lama admin/admin123 terdeteksi. Buat kredensial pemilik baru sebelum melanjutkan."
-                } else null,
-                notice = notice
-            )
-        }
+        // Rebind Room against the restored files, then use the SAME guarded initialization as
+        // startup: if the restored database cannot be opened, the fatal recovery surface is shown
+        // instead of resuming the old session or hanging on `initializing`.
+        AppDatabase.closeAndClear()
+        viewModelScope.launch { runGuardedInitialization(notice) }
     }
 }
