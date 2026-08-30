@@ -237,23 +237,55 @@ class BackupService(
     }
 
     /**
-     * Removes the OLD database's SQLite sidecars before a staged database is installed.
+     * SECURES the OLD database's SQLite sidecars instead of destroying them.
      *
-     * A WAL file is part of SQLite's persistent state: leaving a stale `-wal`/`-shm` from the
-     * previous database beside a newly restored one can resurrect old pages or corrupt the
-     * restored database outright. So this fails CLOSED — if a sidecar exists and cannot be
-     * deleted, the caller's ownership ledger rolls the original database back and the staged
-     * database is never applied.
+     * A `-wal` is part of SQLite's persistent state and belongs to the database it was written
+     * with, so two invariants must hold at once:
      *
-     * A sidecar that simply does not exist is NOT a failure (`File.delete()` returning false on a
-     * missing file is expected and ignored).
+     *  1. no OLD `-wal`/`-shm` may remain at the canonical live sidecar names once the staged
+     *     database becomes live (a stale WAL can resurrect old pages or corrupt the restore); and
+     *  2. a sidecar removed before commit must still be recoverable if a LATER step fails.
+     *
+     * Deleting them (Revision 03) satisfied (1) but broke (2). So they are MOVED to temporary
+     * previous-sidecar locations and recorded in the ownership ledger, which restores them
+     * alongside the previous database on rollback.
+     *
+     * Any stale previous-sidecar temp file is cleared FIRST, while the current database is still
+     * untouched — if that cleanup fails we fail before modifying live state at all.
+     *
+     * No empty replacement sidecars are created: SQLite/Room makes fresh ones on reopen.
      */
-    private fun purgeSidecars(wal: File, shm: File) {
-        if (wal.exists() && !fileOps.delete(wal)) {
-            throw IllegalStateException("Gagal membersihkan WAL database lama")
+    private fun secureSidecars(
+        state: ApplyState,
+        wal: File,
+        previousWal: File,
+        shm: File,
+        previousShm: File
+    ) {
+        if (wal.exists() && !fileOps.rename(wal, previousWal)) {
+            throw IllegalStateException("Gagal mengamankan WAL database lama")
         }
-        if (shm.exists() && !fileOps.delete(shm)) {
-            throw IllegalStateException("Gagal membersihkan SHM database lama")
+        // Flag ownership only when the sidecar genuinely landed in its temp location, so rollback
+        // never tries to restore something it does not hold.
+        if (previousWal.exists()) state.walBackedUp = true
+
+        if (shm.exists() && !fileOps.rename(shm, previousShm)) {
+            throw IllegalStateException("Gagal mengamankan SHM database lama")
+        }
+        if (previousShm.exists()) state.shmBackedUp = true
+    }
+
+    /**
+     * Clears stale previous-sidecar temp files BEFORE any live state is modified.
+     *
+     * Runs while the current database is still fully intact, so failing here costs nothing.
+     */
+    private fun clearStaleSidecarTemps(previousWal: File, previousShm: File) {
+        if (previousWal.exists() && !fileOps.delete(previousWal)) {
+            throw IllegalStateException("Gagal membersihkan cadangan WAL sebelumnya")
+        }
+        if (previousShm.exists() && !fileOps.delete(previousShm)) {
+            throw IllegalStateException("Gagal membersihkan cadangan SHM sebelumnya")
         }
     }
 
@@ -281,21 +313,30 @@ class BackupService(
         val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
         val wal = File(parent, "${AppDatabase.NAME}-wal")
         val shm = File(parent, "${AppDatabase.NAME}-shm")
+        val previousWal = File(parent, "${AppDatabase.NAME}.pre_restore-wal")
+        val previousShm = File(parent, "${AppDatabase.NAME}.pre_restore-shm")
 
         // Same data-safety standard as the package path: an ownership ledger decides what
         // rollback is allowed to touch, and an incomplete recovery is reported honestly.
-        val state = ApplyState(fileOps, live, previous)
+        val state = ApplyState(
+            fileOps, live, previous,
+            liveWal = wal, previousWal = previousWal,
+            liveShm = shm, previousShm = previousShm
+        )
 
         AppDatabase.closeAndClear()
         try {
+            // Clear stale temps while the CURRENT database is still fully intact.
             if (previous.exists() && !fileOps.delete(previous)) {
                 throw IllegalStateException("Gagal membersihkan cadangan database sebelumnya")
             }
+            clearStaleSidecarTemps(previousWal, previousShm)
+
             if (live.exists()) {
                 if (!fileOps.rename(live, previous)) throw IllegalStateException("Gagal mengamankan database lama")
                 state.dbBackedUp = true
             }
-            purgeSidecars(wal, shm)
+            secureSidecars(state, wal, previousWal, shm, previousShm)
 
             if (!fileOps.rename(staged, live)) throw IllegalStateException("Gagal menerapkan database restore")
             state.newDbApplied = true
@@ -304,6 +345,8 @@ class BackupService(
             // remove the temporary previous copy must NOT roll it back — report a warning instead.
             val leftovers = mutableListOf<String>()
             if (previous.exists() && !fileOps.delete(previous)) leftovers += "db"
+            if (previousWal.exists() && !fileOps.delete(previousWal)) leftovers += "wal"
+            if (previousShm.exists() && !fileOps.delete(previousShm)) leftovers += "shm"
             return BackupResult(
                 true,
                 buildRestoreMessage(
@@ -359,6 +402,8 @@ class BackupService(
         val previous = File(parent, "${AppDatabase.NAME}.pre_restore")
         val wal = File(parent, "${AppDatabase.NAME}-wal")
         val shm = File(parent, "${AppDatabase.NAME}-shm")
+        val previousWal = File(parent, "${AppDatabase.NAME}.pre_restore-wal")
+        val previousShm = File(parent, "${AppDatabase.NAME}.pre_restore-shm")
         val photoPre = File(context.filesDir, "product_photos.pre")
         val logoPre = File(context.filesDir, "store_media.pre")
         val pDir = photoDir()
@@ -368,18 +413,25 @@ class BackupService(
         // staged-new copy, and may only report recovery when a previously secured copy was
         // actually put back. A resource that was never moved is still the ORIGINAL and must
         // never be deleted during rollback.
-        val state = ApplyState(fileOps, live, previous, pDir, photoPre, lDir, logoPre)
+        val state = ApplyState(
+            fileOps, live, previous, pDir, photoPre, lDir, logoPre,
+            liveWal = wal, previousWal = previousWal,
+            liveShm = shm, previousShm = previousShm
+        )
 
         AppDatabase.closeAndClear()
         try {
+            // Clear stale temps while the CURRENT database is still fully intact.
             if (previous.exists() && !fileOps.delete(previous)) {
                 throw IllegalStateException("Gagal membersihkan cadangan database sebelumnya")
             }
+            clearStaleSidecarTemps(previousWal, previousShm)
+
             if (live.exists()) {
                 if (!fileOps.rename(live, previous)) throw IllegalStateException("Gagal mengamankan database lama")
                 state.dbBackedUp = true
             }
-            purgeSidecars(wal, shm)
+            secureSidecars(state, wal, previousWal, shm, previousShm)
 
             photoPre.deleteRecursively()
             if (pDir.exists()) {
@@ -413,6 +465,8 @@ class BackupService(
             if (photoPre.exists() && !fileOps.deleteRecursively(photoPre)) leftovers += "photos"
             if (logoPre.exists() && !fileOps.deleteRecursively(logoPre)) leftovers += "logo"
             if (previous.exists() && !fileOps.delete(previous)) leftovers += "db"
+            if (previousWal.exists() && !fileOps.delete(previousWal)) leftovers += "wal"
+            if (previousShm.exists() && !fileOps.delete(previousShm)) leftovers += "shm"
             stagingDir.deleteRecursively()
             return BackupResult(
                 true,
@@ -454,7 +508,13 @@ class BackupService(
         private val photoDir: File? = null,
         private val photoPre: File? = null,
         private val logoDir: File? = null,
-        private val logoPre: File? = null
+        private val logoPre: File? = null,
+        /** Canonical live `-wal` sidecar of [live], and the temp location it is secured into. */
+        private val liveWal: File? = null,
+        private val previousWal: File? = null,
+        /** Canonical live `-shm` sidecar of [live], and the temp location it is secured into. */
+        private val liveShm: File? = null,
+        private val previousShm: File? = null
     ) {
         /** True only when the ORIGINAL db was successfully moved aside to [previous]. */
         var dbBackedUp = false
@@ -462,6 +522,10 @@ class BackupService(
         var photoBackedUp = false
         /** True only when the ORIGINAL store media were successfully moved to [logoPre]. */
         var logoBackedUp = false
+        /** True only when the ORIGINAL `-wal` was successfully moved aside to [previousWal]. */
+        var walBackedUp = false
+        /** True only when the ORIGINAL `-shm` was successfully moved aside to [previousShm]. */
+        var shmBackedUp = false
         /** True only when the staged-new db now occupies [live]. */
         var newDbApplied = false
         /** True only when staged-new photos now occupy [photoDir]. */
@@ -483,6 +547,25 @@ class BackupService(
                 }
             }
             // !dbBackedUp && !newDbApplied -> `live` was never moved: it IS the original. Leave it.
+
+            // ---- SQLite sidecars ----
+            // A WAL/SHM belongs to the database it was written with, so a secured sidecar must
+            // come back together with the database it accompanied. A sidecar that never existed,
+            // or whose securing move never succeeded, is left strictly alone.
+            if (walBackedUp && liveWal != null && previousWal != null) {
+                if (liveWal.exists() && !ops.delete(liveWal)) {
+                    failed += "WAL hasil restore tidak dapat dihapus"
+                } else if (!ops.rename(previousWal, liveWal)) {
+                    failed += "WAL database lama tidak dapat dikembalikan"
+                }
+            }
+            if (shmBackedUp && liveShm != null && previousShm != null) {
+                if (liveShm.exists() && !ops.delete(liveShm)) {
+                    failed += "SHM hasil restore tidak dapat dihapus"
+                } else if (!ops.rename(previousShm, liveShm)) {
+                    failed += "SHM database lama tidak dapat dikembalikan"
+                }
+            }
 
             // ---- product photos ----
             if (photoDir != null && photoPre != null) {
