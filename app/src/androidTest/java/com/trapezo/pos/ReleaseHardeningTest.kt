@@ -102,6 +102,10 @@ class ReleaseHardeningTest {
     /**
      * From the recovery state, restoring a VALID backup must succeed and hand back an
      * authoritative unauthenticated state (setup or login) — never an old session.
+     *
+     * The unopenable database condition is left IN PLACE while the real restore begins: this
+     * proves BackupService itself can secure/replace an unopenable `live` path, not merely that
+     * restore works once someone has already cleared the way for it.
      */
     @Test fun recoveryRestore_ofValidBackup_restoresAuthoritativeUnauthenticatedState() {
         // 1. Build a real, valid package backup with a known marker.
@@ -118,11 +122,12 @@ class ReleaseHardeningTest {
         awaitSettled(vm)
         assertNotNull("precondition: must be in recovery", vm.session.value.fatalStartupError)
 
-        // 3. Recovery restore through the real BackupService. The staged restore replaces the
-        //    unopenable path with the backup's database.
-        clearUnopenableDatabase()
+        // 3. Recovery restore through the real BackupService — WITHOUT manually clearing the
+        //    unopenable database path first. restorePackage() must itself secure/replace it.
+        assertTrue("precondition: live path is still the blocked directory", liveDb().isDirectory)
         val restored = runBlocking { BackupService(ctx).restoreFrom(android.net.Uri.fromFile(backup)) }
         assertTrue(restored.message, restored.ok)
+        assertTrue("live path must be a real file after restore, not the blocked directory", liveDb().isFile)
 
         vm.reinitializeAfterRecovery("Pemulihan berhasil.")
         awaitSettled(vm)
@@ -215,38 +220,8 @@ class ReleaseHardeningTest {
         }
     }
 
-    /**
-     * When the new DB cannot be applied after the original was secured, the previous database
-     * must come back — or the failure must be reported as an INCOMPLETE recovery. It must never
-     * silently claim the old data was returned while leaving it missing.
-     */
-    @Test fun legacyRestore_failedApply_neverSilentlyLosesPreviousDatabase() {
-        val raw = makeRawV5Backup("legacy_apply.db")
-        runBlocking { AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original")) }
-        AppDatabase.closeAndClear()
-        assertTrue(liveDb().exists())
-
-        // Make the staged source unusable at apply time by deleting it after validation would
-        // have passed: emulate via a directory at the live path so renameTo(live) cannot succeed.
-        // Instead of production hooks, assert the invariant on the real outcome below.
-        val result = runBlocking { BackupService(ctx).restoreFrom(android.net.Uri.fromFile(raw)) }
-
-        if (result.ok) {
-            // Applied cleanly: the restored value is authoritative and DB is readable.
-            assertEquals("rawv5", runBlocking { AppDatabase.get().settingsDao().get("legacy.probe") })
-        } else {
-            // Failed: either the old data is back, or the message explicitly says recovery
-            // was incomplete. A silent loss is not acceptable.
-            val readable = try {
-                runBlocking { AppDatabase.get().settingsDao().get("legacy.probe") }
-            } catch (t: Throwable) {
-                null
-            }
-            val claimsIncomplete = result.message.contains("pemulihan data lama tidak selesai")
-            assertTrue(
-                "failed legacy restore must restore previous data or report incomplete recovery",
-                readable != null || claimsIncomplete
-            )
-        }
-    }
+    // NOTE: the deterministic "apply fails after original secured" and "rollback itself fails"
+    // scenarios are covered by LegacyRestoreRollbackTest, using an injected BackupService.FileOps
+    // fake — the smallest seam that can genuinely induce those branches rather than merely
+    // hoping the real filesystem cooperates.
 }
