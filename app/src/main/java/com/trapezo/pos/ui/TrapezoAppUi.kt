@@ -149,7 +149,11 @@ private fun StartupRecoveryScreen(
                     }
                     busy = false
                     if (result.ok) {
-                        onRecovered("Pemulihan berhasil. Silakan masuk kembali menggunakan akun dari backup.")
+                        // Preserve BackupService's authoritative message. A restore can succeed
+                        // AND carry a POST-COMMIT cleanup warning, or (for legacy raw `.db`
+                        // backups) a note that media may be missing — discarding it here would
+                        // hide a real caveat behind a generic success line.
+                        onRecovered(result.message)
                     } else {
                         // Stay on the recovery screen and report the real, safe error.
                         failure = result.message
