@@ -236,6 +236,39 @@ class BackupService(
         return header[0] == 'P'.code.toByte() && header[1] == 'K'.code.toByte()
     }
 
+    /**
+     * Removes the OLD database's SQLite sidecars before a staged database is installed.
+     *
+     * A WAL file is part of SQLite's persistent state: leaving a stale `-wal`/`-shm` from the
+     * previous database beside a newly restored one can resurrect old pages or corrupt the
+     * restored database outright. So this fails CLOSED — if a sidecar exists and cannot be
+     * deleted, the caller's ownership ledger rolls the original database back and the staged
+     * database is never applied.
+     *
+     * A sidecar that simply does not exist is NOT a failure (`File.delete()` returning false on a
+     * missing file is expected and ignored).
+     */
+    private fun purgeSidecars(wal: File, shm: File) {
+        if (wal.exists() && !fileOps.delete(wal)) {
+            throw IllegalStateException("Gagal membersihkan WAL database lama")
+        }
+        if (shm.exists() && !fileOps.delete(shm)) {
+            throw IllegalStateException("Gagal membersihkan SHM database lama")
+        }
+    }
+
+    /**
+     * Appends a cleanup warning when POST-COMMIT removal of temporary previous copies failed.
+     *
+     * The restore itself already succeeded and the restored data is live, so this never turns
+     * into a failure — but the message must not claim the temporary copies were removed when they
+     * were not. No filesystem paths are exposed.
+     */
+    private fun buildRestoreMessage(success: String, leftovers: List<String>): String =
+        if (leftovers.isEmpty()) success else
+            "$success Namun file cadangan sementara tidak dapat dibersihkan. Coba mulai ulang " +
+                "aplikasi sebelum melakukan restore berikutnya."
+
     /** Legacy raw-SQLite restore: DB only, media never included. */
     internal fun restoreLegacy(staged: File, live: File): BackupResult {
         if (staged.length() > MAX_BACKUP_BYTES) {
@@ -262,16 +295,22 @@ class BackupService(
                 if (!fileOps.rename(live, previous)) throw IllegalStateException("Gagal mengamankan database lama")
                 state.dbBackedUp = true
             }
-            wal.delete(); shm.delete()
+            purgeSidecars(wal, shm)
 
             if (!fileOps.rename(staged, live)) throw IllegalStateException("Gagal menerapkan database restore")
             state.newDbApplied = true
 
-            fileOps.delete(previous)
+            // POST-COMMIT: the restored database is already authoritative and live. A failure to
+            // remove the temporary previous copy must NOT roll it back — report a warning instead.
+            val leftovers = mutableListOf<String>()
+            if (previous.exists() && !fileOps.delete(previous)) leftovers += "db"
             return BackupResult(
                 true,
-                "Backup database lama berhasil dipulihkan. Foto/logo dari backup lama hanya " +
-                    "tersedia jika file medianya masih ada di perangkat."
+                buildRestoreMessage(
+                    "Backup database lama berhasil dipulihkan. Foto/logo dari backup lama hanya " +
+                        "tersedia jika file medianya masih ada di perangkat.",
+                    leftovers
+                )
             )
         } catch (e: Exception) {
             val unrecovered = state.rollback()
@@ -340,7 +379,7 @@ class BackupService(
                 if (!fileOps.rename(live, previous)) throw IllegalStateException("Gagal mengamankan database lama")
                 state.dbBackedUp = true
             }
-            wal.delete(); shm.delete()
+            purgeSidecars(wal, shm)
 
             photoPre.deleteRecursively()
             if (pDir.exists()) {
@@ -367,9 +406,21 @@ class BackupService(
                 state.newLogosApplied = true
             }
 
-            photoPre.deleteRecursively(); logoPre.deleteRecursively(); previous.delete()
+            // POST-COMMIT: the restored database and media are already authoritative and live.
+            // A failure to remove the temporary previous copies must NOT roll them back — the
+            // restore stays successful and an explicit warning is returned instead.
+            val leftovers = mutableListOf<String>()
+            if (photoPre.exists() && !fileOps.deleteRecursively(photoPre)) leftovers += "photos"
+            if (logoPre.exists() && !fileOps.deleteRecursively(logoPre)) leftovers += "logo"
+            if (previous.exists() && !fileOps.delete(previous)) leftovers += "db"
             stagingDir.deleteRecursively()
-            return BackupResult(true, "Restore berhasil. Data, foto produk, dan logo toko telah dipulihkan.")
+            return BackupResult(
+                true,
+                buildRestoreMessage(
+                    "Restore berhasil. Data, foto produk, dan logo toko telah dipulihkan.",
+                    leftovers
+                )
+            )
         } catch (e: Exception) {
             val unrecovered = state.rollback()
             stagingDir.deleteRecursively()

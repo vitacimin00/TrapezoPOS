@@ -166,4 +166,148 @@ class LegacyRestoreRollbackTest {
         AppDatabase.get()
         assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
     }
+
+    // ---- Revision 03: SQLite sidecar (WAL/SHM) fail-closed ----
+
+    /**
+     * A stale `-wal` from the OLD database must never be left beside a NEW restored database.
+     * When it exists and cannot be deleted, restore must fail CLOSED: the staged database is
+     * never applied and the original database comes back intact.
+     */
+    @Test fun staleWalThatCannotBeDeleted_failsClosedAndKeepsOriginal() = runBlocking {
+        val raw = makeRawV5Backup("wal_fail.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val bytesBefore = live.readBytes()
+
+        // An OLD wal sits beside the live DB.
+        val wal = File(live.parentFile, "${AppDatabase.NAME}-wal")
+        wal.writeBytes(ByteArray(64) { 0x7f })
+        assertTrue("precondition: stale wal exists", wal.exists())
+
+        var applyAttempted = false
+        val ops = object : RealBase() {
+            override fun delete(file: File): Boolean =
+                if (file.name.endsWith("-wal")) false else super.delete(file)
+
+            override fun rename(from: File, to: File): Boolean {
+                if (from == raw && to == live) applyAttempted = true
+                return super.rename(from, to)
+            }
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertFalse("restore must fail when the stale WAL cannot be removed", result.ok)
+        assertFalse("staged DB must NEVER be applied after sidecar cleanup failed", applyAttempted)
+        assertTrue(
+            "message must not claim success: ${result.message}",
+            !result.message.contains("berhasil dipulihkan")
+        )
+        // The ORIGINAL database is back, byte-for-byte, and still readable.
+        assertTrue(live.exists())
+        assertEquals(bytesBefore.size, live.readBytes().size)
+        assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
+
+        AppDatabase.closeAndClear()
+        wal.delete()
+        Unit
+    }
+
+    /** Same invariant for the `-shm` sidecar. */
+    @Test fun staleShmThatCannotBeDeleted_failsClosedAndKeepsOriginal() = runBlocking {
+        val raw = makeRawV5Backup("shm_fail.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val bytesBefore = live.readBytes()
+
+        val shm = File(live.parentFile, "${AppDatabase.NAME}-shm")
+        shm.writeBytes(ByteArray(32) { 0x5a })
+        assertTrue("precondition: stale shm exists", shm.exists())
+
+        var applyAttempted = false
+        val ops = object : RealBase() {
+            override fun delete(file: File): Boolean =
+                if (file.name.endsWith("-shm")) false else super.delete(file)
+
+            override fun rename(from: File, to: File): Boolean {
+                if (from == raw && to == live) applyAttempted = true
+                return super.rename(from, to)
+            }
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertFalse(result.ok)
+        assertFalse("staged DB must never be applied", applyAttempted)
+        assertTrue(live.exists())
+        assertEquals(bytesBefore.size, live.readBytes().size)
+        assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
+
+        AppDatabase.closeAndClear()
+        shm.delete()
+        Unit
+    }
+
+    /** With no sidecars present, a missing-file delete is NOT a failure: restore proceeds. */
+    @Test fun absentSidecars_doNotBlockRestore() = runBlocking {
+        val raw = makeRawV5Backup("no_sidecar.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        File(live.parentFile, "${AppDatabase.NAME}-wal").delete()
+        File(live.parentFile, "${AppDatabase.NAME}-shm").delete()
+
+        // `delete` on a non-existent file returns false — this must be tolerated, not fatal.
+        val result = BackupService(ctx, RealBase()).restoreLegacy(raw, live)
+
+        assertTrue("restore must succeed with no sidecars present: ${result.message}", result.ok)
+        assertEquals("rawv5", AppDatabase.get().settingsDao().get("legacy.probe"))
+    }
+
+    // ---- Revision 03: POST-COMMIT cleanup failure must NOT roll back a valid restore ----
+
+    /**
+     * Once the new database is applied and live it is authoritative. If removing the temporary
+     * `.pre_restore` copy afterwards fails, the restore stays successful and only a warning is
+     * added — rolling back committed data over a leftover temp file would be far worse.
+     */
+    @Test fun postCommitCleanupFailure_keepsNewDatabaseAndWarns() = runBlocking {
+        val raw = makeRawV5Backup("cleanup_fail.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+
+        // Only the POST-COMMIT delete of `.pre_restore` fails; everything before it succeeds.
+        val ops = object : RealBase() {
+            override fun delete(file: File): Boolean =
+                if (file.name.endsWith(".pre_restore")) false else super.delete(file)
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertTrue("restore must remain successful: ${result.message}", result.ok)
+        assertTrue(
+            "must warn about temp cleanup: ${result.message}",
+            result.message.contains("cadangan sementara tidak dapat dibersihkan")
+        )
+        assertFalse(
+            "must not leak filesystem paths: ${result.message}",
+            result.message.contains(".pre_restore") ||
+                result.message.contains("/data/") ||
+                result.message.contains(AppDatabase.NAME)
+        )
+        // The NEW database is live and authoritative — not rolled back.
+        assertEquals("rawv5", AppDatabase.get().settingsDao().get("legacy.probe"))
+
+        AppDatabase.closeAndClear()
+        File(live.parentFile, "${AppDatabase.NAME}.pre_restore").delete()
+        Unit
+    }
 }
