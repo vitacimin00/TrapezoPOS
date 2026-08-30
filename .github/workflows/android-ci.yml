@@ -70,8 +70,17 @@ jobs:
       - name: Unit tests, debug build, instrumentation build
         run: ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest --stacktrace
 
-      - name: Release lint and minified release build
-        run: ./gradlew lintRelease assembleRelease --stacktrace
+      - name: Release lint, minified release build, app bundle, and R8 config
+        # bundleRelease and analyzeReleaseR8Config run against the FINAL R8 configuration, so CI
+        # verifies both shippable artifact paths (APK + AAB) and the shrinker's resolved config.
+        # The artifacts themselves are never uploaded — only the lint report is.
+        run: |
+          ./gradlew \
+            lintRelease \
+            assembleRelease \
+            bundleRelease \
+            :app:analyzeReleaseR8Config \
+            --stacktrace
 
       # The ephemeral keystore and its properties must never outlive the job. The runner is
       # discarded automatically, but remove them explicitly so nothing can be picked up by a
