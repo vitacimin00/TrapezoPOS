@@ -92,6 +92,19 @@ android {
 }
 
 /**
+ * AGP 9 only creates unit-test components for build types that explicitly enable them, so
+ * `testReleaseUnitTest` did not exist even though the build comments and README referenced it.
+ * Enable the release unit-test component so the release gate genuinely runs the JVM test suite
+ * against the release variant instead of silently having nothing to run.
+ */
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variantBuilder ->
+        (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder)
+            .enableUnitTest = true
+    }
+}
+
+/**
  * FAIL CLOSED: a distributable release artifact must never be produced without real
  * production signing. Only PACKAGING tasks are gated — `lintRelease`,
  * `testReleaseUnitTest` and other release analysis tasks stay runnable without secrets.
