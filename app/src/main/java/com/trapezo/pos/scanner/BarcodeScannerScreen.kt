@@ -78,21 +78,40 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
             // "COBA LAGI" never reuses a scanner that was already closed.
             val scanner = BarcodeScanning.getClient()
             val providerFuture = ProcessCameraProvider.getInstance(context)
-            // Hold the resolved provider and the analysis use case so teardown never has to
-            // re-resolve the future (blocking .get() during disposal can return/observe null
-            // internals and is not safe on the main thread).
+
+            // Effect-local disposal latch. ProcessCameraProvider.getInstance() resolves
+            // ASYNCHRONOUSLY, so Compose can dispose this effect before the listener ever runs.
+            // Without this latch the delayed listener would still build an ImageAnalysis, install
+            // an analyzer referencing an ALREADY-CLOSED ML Kit client, and bind the camera after
+            // the scanner UI was dismissed. onDispose sets the latch BEFORE cleanup, and every
+            // asynchronous continuation checks it first.
+            val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+            // Resolved provider and analysis use case, recorded after a successful bind so
+            // teardown never has to re-resolve the future (a blocking .get() during disposal is
+            // not main-thread safe). Only ever touched on the main executor.
             var boundProvider: ProcessCameraProvider? = null
             var boundAnalysis: ImageAnalysis? = null
+
             val listener = Runnable {
+                // Effect already disposed: do not create or bind anything.
+                if (disposed.get()) return@Runnable
                 try {
                     val provider = providerFuture.get()
+                    // Re-check after the (potentially blocking) resolve.
+                    if (disposed.get()) return@Runnable
                     val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
                     val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                     analysis.setAnalyzer(mainExecutor) { imageProxy ->
+                        // The proxy must be closed EXACTLY once on every path, including after
+                        // disposal, otherwise the camera stalls on a retained frame.
+                        if (disposed.get()) { imageProxy.close(); return@setAnalyzer }
                         val input = inputImageFrom(imageProxy)
                         if (input == null) { imageProxy.close(); return@setAnalyzer }
                         scanner.process(input)
                             .addOnSuccessListener { codes ->
+                                // Never deliver a barcode after the screen was dismissed.
+                                if (disposed.get()) return@addOnSuccessListener
                                 val raw = codes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue
                                 if (!consumed && raw != null) {
                                     consumed = true
@@ -102,17 +121,31 @@ fun BarcodeScannerScreen(onBarcode: (String) -> Unit, onDismiss: () -> Unit) {
                             .addOnCompleteListener { imageProxy.close() }
                     }
                     provider.unbindAll()
+                    // Last check before binding: a dispose may have landed while we built the
+                    // use cases. If so, bind nothing and leave the provider unbound.
+                    if (disposed.get()) {
+                        try { analysis.clearAnalyzer() } catch (_: Exception) { }
+                        return@Runnable
+                    }
                     provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                     boundProvider = provider
                     boundAnalysis = analysis
+                    // Dispose raced us after bindToLifecycle: tear the binding down immediately.
+                    if (disposed.get()) {
+                        try { analysis.clearAnalyzer() } catch (_: Exception) { }
+                        try { provider.unbindAll() } catch (_: Exception) { }
+                    }
                 } catch (e: Exception) {
+                    if (disposed.get()) return@Runnable
                     // Recoverable error state instead of a silent black screen.
                     bindError = "Kamera tidak tersedia: ${e.message ?: "gagal membuka kamera"}"
                 }
             }
             providerFuture.addListener(listener, mainExecutor)
             onDispose {
-                // Detach the analyzer first so no in-flight frame reaches a closed scanner.
+                // Latch FIRST so any pending listener/callback becomes a no-op.
+                disposed.set(true)
+                // Detach the analyzer so no in-flight frame reaches a closed scanner.
                 try { boundAnalysis?.clearAnalyzer() } catch (_: Exception) { }
                 try { boundProvider?.unbindAll() } catch (_: Exception) { }
                 try { scanner.close() } catch (_: Exception) { }

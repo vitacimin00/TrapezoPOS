@@ -139,7 +139,12 @@ private fun StartupRecoveryScreen(
                 scope.launch {
                     val result = try {
                         BackupService(context).restoreFrom(uri)
-                    } catch (t: Throwable) {
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        // Never swallow cancellation.
+                        throw e
+                    } catch (e: Exception) {
+                        // Only genuine failures are turned into a user-facing message; JVM Errors
+                        // (OOM, LinkageError, ...) are deliberately NOT caught here.
                         BackupService.BackupResult(false, "Restore gagal. File backup tidak dapat diproses.")
                     }
                     busy = false
