@@ -67,8 +67,16 @@ jobs:
           } > keystore.properties
           echo "Ephemeral CI signing configuration written (never a production key)."
 
-      - name: Unit tests, debug build, instrumentation build
-        run: ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest --stacktrace
+      - name: Unit tests (debug + release), debug build, instrumentation build
+        # testReleaseUnitTest now genuinely exists (the release unit-test component is enabled in
+        # app/build.gradle.kts), so the release JVM suite runs in CI alongside the debug one.
+        run: |
+          ./gradlew \
+            testDebugUnitTest \
+            testReleaseUnitTest \
+            assembleDebug \
+            assembleDebugAndroidTest \
+            --stacktrace
 
       - name: Release lint, minified release build, app bundle, and R8 config
         # bundleRelease and analyzeReleaseR8Config run against the FINAL R8 configuration, so CI
