@@ -9,6 +9,7 @@ import com.trapezo.pos.data.database.AppDatabase
 import com.trapezo.pos.data.entity.SettingEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -98,7 +99,7 @@ class LegacyRestoreRollbackTest {
 
         // C: the PREVIOUS database is genuinely back at `live`, byte for byte.
         assertTrue(live.exists())
-        assertEquals(bytesBefore.size, live.readBytes().size)
+        assertArrayEquals("previous DB not restored byte-for-byte", bytesBefore, live.readBytes())
 
         AppDatabase.get()
         assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
@@ -162,19 +163,23 @@ class LegacyRestoreRollbackTest {
 
         assertFalse(result.ok)
         assertTrue(live.exists())
-        assertEquals(bytesBefore.size, live.readBytes().size)
+        assertArrayEquals("original DB not preserved byte-for-byte", bytesBefore, live.readBytes())
         AppDatabase.get()
         assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
     }
 
-    // ---- Revision 03: SQLite sidecar (WAL/SHM) fail-closed ----
+    // ---- SQLite sidecar securing fails -> fail CLOSED (Revision 04 semantics) ----
+    //
+    // Revision 03 DELETED the old sidecars before commit; Revision 04 MOVES them to temp
+    // locations so rollback can restore them. These two tests therefore induce a failure of the
+    // *securing move*, which is the Revision 04 equivalent of "the old sidecar cannot be cleared
+    // from the canonical live name".
 
     /**
-     * A stale `-wal` from the OLD database must never be left beside a NEW restored database.
-     * When it exists and cannot be deleted, restore must fail CLOSED: the staged database is
-     * never applied and the original database comes back intact.
+     * An OLD `-wal` that cannot be moved out of the canonical live sidecar name must fail CLOSED:
+     * the staged database is never applied, and the original database plus its WAL are untouched.
      */
-    @Test fun staleWalThatCannotBeDeleted_failsClosedAndKeepsOriginal() = runBlocking {
+    @Test fun walThatCannotBeSecured_failsClosedAndKeepsOriginal() = runBlocking {
         val raw = makeRawV5Backup("wal_fail.db")
         AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
         AppDatabase.closeAndClear()
@@ -184,31 +189,34 @@ class LegacyRestoreRollbackTest {
 
         // An OLD wal sits beside the live DB.
         val wal = File(live.parentFile, "${AppDatabase.NAME}-wal")
-        wal.writeBytes(ByteArray(64) { 0x7f })
+        val walBytes = ByteArray(64) { 0x7f }
+        wal.writeBytes(walBytes)
         assertTrue("precondition: stale wal exists", wal.exists())
 
         var applyAttempted = false
         val ops = object : RealBase() {
-            override fun delete(file: File): Boolean =
-                if (file.name.endsWith("-wal")) false else super.delete(file)
-
             override fun rename(from: File, to: File): Boolean {
                 if (from == raw && to == live) applyAttempted = true
+                // securing the WAL out of the live name fails
+                if (from == wal && to.name.endsWith(".pre_restore-wal")) return false
                 return super.rename(from, to)
             }
         }
 
         val result = BackupService(ctx, ops).restoreLegacy(raw, live)
 
-        assertFalse("restore must fail when the stale WAL cannot be removed", result.ok)
-        assertFalse("staged DB must NEVER be applied after sidecar cleanup failed", applyAttempted)
+        assertFalse("restore must fail when the old WAL cannot be secured", result.ok)
+        assertFalse("staged DB must NEVER be applied after sidecar securing failed", applyAttempted)
         assertTrue(
             "message must not claim success: ${result.message}",
             !result.message.contains("berhasil dipulihkan")
         )
         // The ORIGINAL database is back, byte-for-byte, and still readable.
         assertTrue(live.exists())
-        assertEquals(bytesBefore.size, live.readBytes().size)
+        assertArrayEquals("original DB not preserved byte-for-byte", bytesBefore, live.readBytes())
+        // The WAL was never moved, so the original is still exactly in place.
+        assertTrue("original WAL must remain in place", wal.exists())
+        assertArrayEquals("original WAL altered", walBytes, wal.readBytes())
         assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
 
         AppDatabase.closeAndClear()
@@ -217,7 +225,7 @@ class LegacyRestoreRollbackTest {
     }
 
     /** Same invariant for the `-shm` sidecar. */
-    @Test fun staleShmThatCannotBeDeleted_failsClosedAndKeepsOriginal() = runBlocking {
+    @Test fun shmThatCannotBeSecured_failsClosedAndKeepsOriginal() = runBlocking {
         val raw = makeRawV5Backup("shm_fail.db")
         AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
         AppDatabase.closeAndClear()
@@ -226,16 +234,15 @@ class LegacyRestoreRollbackTest {
         val bytesBefore = live.readBytes()
 
         val shm = File(live.parentFile, "${AppDatabase.NAME}-shm")
-        shm.writeBytes(ByteArray(32) { 0x5a })
+        val shmBytes = ByteArray(32) { 0x5a }
+        shm.writeBytes(shmBytes)
         assertTrue("precondition: stale shm exists", shm.exists())
 
         var applyAttempted = false
         val ops = object : RealBase() {
-            override fun delete(file: File): Boolean =
-                if (file.name.endsWith("-shm")) false else super.delete(file)
-
             override fun rename(from: File, to: File): Boolean {
                 if (from == raw && to == live) applyAttempted = true
+                if (from == shm && to.name.endsWith(".pre_restore-shm")) return false
                 return super.rename(from, to)
             }
         }
@@ -245,7 +252,9 @@ class LegacyRestoreRollbackTest {
         assertFalse(result.ok)
         assertFalse("staged DB must never be applied", applyAttempted)
         assertTrue(live.exists())
-        assertEquals(bytesBefore.size, live.readBytes().size)
+        assertArrayEquals("original DB not preserved byte-for-byte", bytesBefore, live.readBytes())
+        assertTrue("original SHM must remain in place", shm.exists())
+        assertArrayEquals("original SHM altered", shmBytes, shm.readBytes())
         assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
 
         AppDatabase.closeAndClear()
@@ -253,7 +262,7 @@ class LegacyRestoreRollbackTest {
         Unit
     }
 
-    /** With no sidecars present, a missing-file delete is NOT a failure: restore proceeds. */
+    /** With no sidecars present there is nothing to secure: restore proceeds unchanged (E). */
     @Test fun absentSidecars_doNotBlockRestore() = runBlocking {
         val raw = makeRawV5Backup("no_sidecar.db")
         AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
@@ -263,7 +272,7 @@ class LegacyRestoreRollbackTest {
         File(live.parentFile, "${AppDatabase.NAME}-wal").delete()
         File(live.parentFile, "${AppDatabase.NAME}-shm").delete()
 
-        // `delete` on a non-existent file returns false — this must be tolerated, not fatal.
+        // Absent sidecars must not be treated as a failure: nothing to secure, nothing to roll back.
         val result = BackupService(ctx, RealBase()).restoreLegacy(raw, live)
 
         assertTrue("restore must succeed with no sidecars present: ${result.message}", result.ok)
@@ -308,6 +317,232 @@ class LegacyRestoreRollbackTest {
 
         AppDatabase.closeAndClear()
         File(live.parentFile, "${AppDatabase.NAME}.pre_restore").delete()
+        Unit
+    }
+
+    // ---- Revision 04: sidecars are SECURED and roll back with the database ----
+
+    private fun dbDir() = ctx.getDatabasePath(AppDatabase.NAME).parentFile!!
+    private fun walFile() = File(dbDir(), "${AppDatabase.NAME}-wal")
+    private fun shmFile() = File(dbDir(), "${AppDatabase.NAME}-shm")
+    private fun preWal() = File(dbDir(), "${AppDatabase.NAME}.pre_restore-wal")
+    private fun preShm() = File(dbDir(), "${AppDatabase.NAME}.pre_restore-shm")
+
+    /** A: WAL secured, later apply fails -> main DB AND WAL both come back byte-for-byte. */
+    @Test fun failedApply_restoresOriginalDatabaseAndWal_byteForByte() = runBlocking {
+        val raw = makeRawV5Backup("wal_rollback.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val dbBefore = live.readBytes()
+
+        val wal = walFile()
+        val walBytes = ByteArray(128) { (it * 7 % 251).toByte() }
+        wal.writeBytes(walBytes)
+
+        // Apply of the staged DB fails AFTER main + WAL were secured.
+        val ops = object : RealBase() {
+            override fun rename(from: File, to: File): Boolean =
+                if (from == raw && to == live) false else super.rename(from, to)
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertFalse(result.ok)
+        assertTrue(
+            "must report the old data came back: ${result.message}",
+            result.message.contains("data lama dikembalikan")
+        )
+        // BYTE-FOR-BYTE, asserted before Room reopens the file.
+        assertArrayEquals("original DB not restored byte-for-byte", dbBefore, live.readBytes())
+        assertTrue("original WAL not restored", wal.exists())
+        assertArrayEquals("WAL not restored byte-for-byte", walBytes, wal.readBytes())
+        assertFalse("previous-WAL temp leaked", preWal().exists())
+
+        AppDatabase.get()
+        assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
+        AppDatabase.closeAndClear()
+        wal.delete()
+        Unit
+    }
+
+    /** B: WAL + SHM both secured, later apply fails -> all three restored byte-for-byte. */
+    @Test fun failedApply_restoresDatabaseWalAndShm_byteForByte() = runBlocking {
+        val raw = makeRawV5Backup("wal_shm_rollback.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val dbBefore = live.readBytes()
+
+        val wal = walFile()
+        val shm = shmFile()
+        val walBytes = ByteArray(96) { (it * 3 % 253).toByte() }
+        val shmBytes = ByteArray(48) { (it * 11 % 249).toByte() }
+        wal.writeBytes(walBytes)
+        shm.writeBytes(shmBytes)
+
+        val ops = object : RealBase() {
+            override fun rename(from: File, to: File): Boolean =
+                if (from == raw && to == live) false else super.rename(from, to)
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertFalse(result.ok)
+        assertArrayEquals(dbBefore, live.readBytes())
+        assertTrue(wal.exists())
+        assertArrayEquals("WAL not restored byte-for-byte", walBytes, wal.readBytes())
+        assertTrue(shm.exists())
+        assertArrayEquals("SHM not restored byte-for-byte", shmBytes, shm.readBytes())
+        assertFalse(preWal().exists())
+        assertFalse(preShm().exists())
+
+        AppDatabase.get()
+        assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
+        AppDatabase.closeAndClear()
+        wal.delete(); shm.delete()
+        Unit
+    }
+
+    /** C: WAL secured but securing the SHM fails -> new DB never applied, earlier state restored. */
+    @Test fun shmSecureFailure_neverAppliesNewDb_andRestoresEarlierResources() = runBlocking {
+        val raw = makeRawV5Backup("shm_secure_fail.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val dbBefore = live.readBytes()
+
+        val wal = walFile()
+        val shm = shmFile()
+        val walBytes = ByteArray(64) { 0x21 }
+        val shmBytes = ByteArray(24) { 0x42 }
+        wal.writeBytes(walBytes)
+        shm.writeBytes(shmBytes)
+
+        var applyAttempted = false
+        val ops = object : RealBase() {
+            override fun rename(from: File, to: File): Boolean {
+                if (from == raw && to == live) applyAttempted = true
+                // Securing the SHM fails; securing the WAL and the main DB succeed.
+                if (from == shm && to.name.endsWith(".pre_restore-shm")) return false
+                return super.rename(from, to)
+            }
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertFalse(result.ok)
+        assertFalse("new DB must NEVER be applied when securing a sidecar failed", applyAttempted)
+        assertArrayEquals("original DB not restored byte-for-byte", dbBefore, live.readBytes())
+        assertTrue("original WAL must be restored", wal.exists())
+        assertArrayEquals(walBytes, wal.readBytes())
+        // The SHM was never moved, so it is still the original in place, untouched.
+        assertTrue("original SHM must remain in place", shm.exists())
+        assertArrayEquals(shmBytes, shm.readBytes())
+
+        AppDatabase.get()
+        assertEquals("original", AppDatabase.get().settingsDao().get("legacy.probe"))
+        AppDatabase.closeAndClear()
+        wal.delete(); shm.delete()
+        Unit
+    }
+
+    /** D: rollback of the secured WAL itself fails -> incomplete recovery reported honestly. */
+    @Test fun walRollbackFailure_reportsIncompleteRecovery() = runBlocking {
+        val raw = makeRawV5Backup("wal_rollback_fail.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val wal = walFile()
+        wal.writeBytes(ByteArray(80) { 0x33 })
+
+        val ops = object : RealBase() {
+            override fun rename(from: File, to: File): Boolean = when {
+                from == raw && to == live -> false                                  // apply fails
+                from.name.endsWith(".pre_restore-wal") && to == wal -> false        // WAL rollback fails
+                else -> super.rename(from, to)
+            }
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertFalse(result.ok)
+        assertTrue(
+            "must explicitly report incomplete recovery: ${result.message}",
+            result.message.contains("pemulihan data lama tidak selesai")
+        )
+        assertFalse(
+            "must NOT claim the old data was fully returned",
+            result.message.contains("data lama dikembalikan")
+        )
+        assertTrue(
+            "must name the WAL as unrecovered: ${result.message}",
+            result.message.contains("WAL")
+        )
+
+        AppDatabase.closeAndClear()
+        preWal().delete(); wal.delete()
+        Unit
+    }
+
+    /** F: a successful restore leaves NO old sidecar at the canonical live names. */
+    @Test fun successfulRestore_leavesNoStaleSidecarsAtLiveNames() = runBlocking {
+        val raw = makeRawV5Backup("sidecar_success.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val wal = walFile()
+        val shm = shmFile()
+        wal.writeBytes(ByteArray(72) { 0x6b })
+        shm.writeBytes(ByteArray(36) { 0x1c })
+
+        val result = BackupService(ctx, RealBase()).restoreLegacy(raw, live)
+
+        assertTrue("restore must succeed: ${result.message}", result.ok)
+        assertFalse("stale WAL left at the live sidecar name", wal.exists())
+        assertFalse("stale SHM left at the live sidecar name", shm.exists())
+        assertFalse("previous-WAL temp not cleaned", preWal().exists())
+        assertFalse("previous-SHM temp not cleaned", preShm().exists())
+        assertFalse(
+            "clean restore must not emit a cleanup warning: ${result.message}",
+            result.message.contains("cadangan sementara tidak dapat dibersihkan")
+        )
+        assertEquals("rawv5", AppDatabase.get().settingsDao().get("legacy.probe"))
+        AppDatabase.closeAndClear()
+        Unit
+    }
+
+    /** Post-commit failure to clean a secured WAL temp warns but keeps the new DB. */
+    @Test fun postCommitWalTempCleanupFailure_keepsNewDatabaseAndWarns() = runBlocking {
+        val raw = makeRawV5Backup("wal_temp_cleanup.db")
+        AppDatabase.get().settingsDao().put(SettingEntity(key = "legacy.probe", value = "original"))
+        AppDatabase.closeAndClear()
+
+        val live = ctx.getDatabasePath(AppDatabase.NAME)
+        val wal = walFile()
+        wal.writeBytes(ByteArray(56) { 0x09 })
+
+        // Only the POST-COMMIT delete of the secured WAL temp fails.
+        val ops = object : RealBase() {
+            override fun delete(file: File): Boolean =
+                if (file.name.endsWith(".pre_restore-wal")) false else super.delete(file)
+        }
+
+        val result = BackupService(ctx, ops).restoreLegacy(raw, live)
+
+        assertTrue("restore must remain successful: ${result.message}", result.ok)
+        assertTrue(
+            "must warn about temp cleanup: ${result.message}",
+            result.message.contains("cadangan sementara tidak dapat dibersihkan")
+        )
+        assertEquals("rawv5", AppDatabase.get().settingsDao().get("legacy.probe"))
+        AppDatabase.closeAndClear()
+        preWal().delete()
         Unit
     }
 }
