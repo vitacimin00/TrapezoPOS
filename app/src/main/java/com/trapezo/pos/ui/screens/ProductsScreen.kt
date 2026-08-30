@@ -356,7 +356,7 @@ fun ProductsScreen(userId: Long, canManage: Boolean) {
                 val result = AppGraph.products.save(product, userId)
                 if (result.ok) {
                     if (previous != null && product.photo != previous.photo && !previous.photo.isNullOrBlank()) {
-                        PhotoStorage.deleteManaged(previous.photo)
+                        PhotoStorage.deleteManaged(context, previous.photo)
                     }
                     feedback?.success(if (previous == null) "Produk tersimpan" else "Produk diperbarui")
                     reloadPageZero()
@@ -797,7 +797,7 @@ private fun ProductEditor(
 
     fun replaceDraftPhoto(path: String) {
         val previous = draft.photo
-        if (previous != null && previous != originalPhoto && previous != path) PhotoStorage.deleteManaged(previous)
+        if (previous != null && previous != originalPhoto && previous != path) PhotoStorage.deleteManaged(context, previous)
         draft = draft.copy(photo = path)
     }
     fun startCamera(capture: (android.net.Uri) -> Unit) {
@@ -852,7 +852,7 @@ private fun ProductEditor(
         onDispose {
             if (!saveSucceeded) {
                 val newPhoto = draft.photo
-                if (newPhoto != null && newPhoto != originalPhoto) PhotoStorage.deleteManaged(newPhoto)
+                if (newPhoto != null && newPhoto != originalPhoto) PhotoStorage.deleteManaged(context, newPhoto)
             }
         }
     }
@@ -902,7 +902,7 @@ private fun ProductEditor(
                                 )
                                 IconButton(
                                     onClick = {
-                                        if (photo != originalPhoto) PhotoStorage.deleteManaged(photo)
+                                        if (photo != originalPhoto) PhotoStorage.deleteManaged(context, photo)
                                         draft = draft.copy(photo = null)
                                     },
                                     modifier = Modifier.align(Alignment.TopEnd)
