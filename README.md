@@ -175,9 +175,22 @@ media/store_media/<file>     logo toko yang direferensikan database
 - `isMinifyEnabled = true` dan `isShrinkResources = true` (R8 + resource shrinking).
 - `proguard-android-optimize.txt` + `proguard-rules.pro`, tanpa keep rule global seperti
   `-keep class com.trapezo.** { *; }`.
-- `android.enableR8.fullMode=false`. R8 full mode terbukti membuat layar scanner crash
-  (`NullPointerException` pada teardown DisposableEffect) di build minified; compatibility mode
-  tetap melakukan shrinking, optimization, dan obfuscation.
+- `android.enableR8.fullMode=false` — **known release limitation.** R8 full mode terbukti
+  membuat layar scanner crash pada siklus buka/tutup pertama di build minified
+  (`NullPointerException: Object.getClass() on a null object reference`, jejak:
+  `BarcodeScannerScreenKt$$ExternalSyntheticLambda6` → `DisposableEffectImpl` →
+  `DaggerCameraPipeComponent$Camera2ControllerComponentImpl` → `material3.DatePickerKt`).
+  Diuji ulang pada source terkini — yaitu **sesudah** perbaikan race disposal scanner — memakai
+  APK yang baru dibuild dan diverifikasi hash-nya; crash tetap terjadi. Retrace `mapping.txt`
+  menunjukkan R8 menggabungkan lambda `onDispose` scanner ke satu synthetic dispatch class
+  (`$r8$classId`) bersama lambda Material3 DatePicker yang tidak berkaitan, sehingga sebuah
+  capture field bernilai null pada cabang yang dieksekusi dan null-check implisit melempar
+  exception sebelum `try/catch` milik `onDispose` sendiri dijalankan.
+  Satu keep rule sempit yang didukung sudah dicoba
+  (`-keep,allowshrinking,allowobfuscation class ...BarcodeScannerScreenKt** { *; }`): diterima
+  R8 tetapi tidak efektif — `mapping.txt` membuktikan lambda scanner masih tergabung dan crash
+  tetap muncul — jadi rule itu dihapus, bukan dibiarkan. Compatibility mode tetap menjalankan
+  shrinking, optimization, dan obfuscation.
 - Room schema saat ini **versi 5** (tanpa destructive migration).
 
 ## Known limitations
@@ -188,9 +201,12 @@ media/store_media/<file>     logo toko yang direferensikan database
 - Paket backup `.trpz` belum dienkripsi.
 - **Printer thermal Bluetooth belum diuji pada hardware fisik.** Jalur ESC/POS SPP masih harus
   melewati acceptance test di printer nyata sebelum rollout produksi.
-- Login memakai PBKDF2 600.000 iterasi. Pada emulator x86_64 (`Medium_Phone`, API 36) satu operasi
-  hash/verify butuh ~5,7 detik; angka ini perlu diukur ulang di perangkat target sebelum work
-  factor difinalkan.
+- **PBKDF2 TARGET-HARDWARE DECISION: PENDING — work factor produksi BELUM difinalkan.**
+  Login memakai PBKDF2-HMAC-SHA256 600.000 iterasi. Pada emulator x86_64 (`Medium_Phone`,
+  API 36) satu operasi hash/verify butuh ~5,7 detik (median 5 sampel: 5648/5665/5706/5864/6061 ms;
+  login teramati ~6,7 s). Angka emulator x86_64 **tidak sah** sebagai angka UX produksi dan
+  tidak dipakai untuk menurunkan iterasi. Benchmark ARM pada perangkat target: **NOT AVAILABLE**.
+  Iterasi 600.000 dipertahankan apa adanya sampai pengukuran perangkat nyata tersedia.
 - Beberapa semantik kolom lanjutan workbook Excel belum bisa dianggap round-trip penuh 49 field.
 
 ## Governance sebelum tag produksi
