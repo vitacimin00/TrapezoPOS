@@ -31,8 +31,33 @@ import java.util.Locale
  * Room owns `PRAGMA user_version`; we never set it manually. The Trapezo marker
  * is carried by `application_id` only.
  */
-class BackupService(private val context: Context) {
+class BackupService(
+    private val context: Context,
+    /**
+     * Minimal filesystem seam for the restore apply/rollback state machine.
+     *
+     * The production default performs real `File` operations. It exists ONLY so the data-safety
+     * branches (secure-original succeeded / apply failed / rollback itself failed) can be driven
+     * deterministically from tests — a rename failure cannot otherwise be provoked reliably. It is
+     * NOT a debug switch: there is no runtime flag, no build-type behaviour, and production always
+     * gets [FileOps.Default].
+     */
+    private val fileOps: FileOps = FileOps.Default
+) {
     data class BackupResult(val ok: Boolean, val message: String, val fileName: String? = null)
+
+    /** Filesystem operations used by the restore apply/rollback path. */
+    interface FileOps {
+        fun rename(from: File, to: File): Boolean
+        fun delete(file: File): Boolean
+        fun deleteRecursively(file: File): Boolean
+
+        object Default : FileOps {
+            override fun rename(from: File, to: File): Boolean = from.renameTo(to)
+            override fun delete(file: File): Boolean = file.delete()
+            override fun deleteRecursively(file: File): Boolean = file.deleteRecursively()
+        }
+    }
 
     companion object {
         /** "TRPZ" in big-endian — SQLite application_id marker for Trapezo POS backups. */
@@ -212,7 +237,7 @@ class BackupService(private val context: Context) {
     }
 
     /** Legacy raw-SQLite restore: DB only, media never included. */
-    private fun restoreLegacy(staged: File, live: File): BackupResult {
+    internal fun restoreLegacy(staged: File, live: File): BackupResult {
         if (staged.length() > MAX_BACKUP_BYTES) {
             return BackupResult(false, "File backup melebihi batas ukuran")
         }
@@ -226,23 +251,23 @@ class BackupService(private val context: Context) {
 
         // Same data-safety standard as the package path: an ownership ledger decides what
         // rollback is allowed to touch, and an incomplete recovery is reported honestly.
-        val state = ApplyState(live, previous)
+        val state = ApplyState(fileOps, live, previous)
 
         AppDatabase.closeAndClear()
         try {
-            if (previous.exists() && !previous.delete()) {
+            if (previous.exists() && !fileOps.delete(previous)) {
                 throw IllegalStateException("Gagal membersihkan cadangan database sebelumnya")
             }
             if (live.exists()) {
-                if (!live.renameTo(previous)) throw IllegalStateException("Gagal mengamankan database lama")
+                if (!fileOps.rename(live, previous)) throw IllegalStateException("Gagal mengamankan database lama")
                 state.dbBackedUp = true
             }
             wal.delete(); shm.delete()
 
-            if (!staged.renameTo(live)) throw IllegalStateException("Gagal menerapkan database restore")
+            if (!fileOps.rename(staged, live)) throw IllegalStateException("Gagal menerapkan database restore")
             state.newDbApplied = true
 
-            previous.delete()
+            fileOps.delete(previous)
             return BackupResult(
                 true,
                 "Backup database lama berhasil dipulihkan. Foto/logo dari backup lama hanya " +
@@ -304,41 +329,41 @@ class BackupService(private val context: Context) {
         // staged-new copy, and may only report recovery when a previously secured copy was
         // actually put back. A resource that was never moved is still the ORIGINAL and must
         // never be deleted during rollback.
-        val state = ApplyState(live, previous, pDir, photoPre, lDir, logoPre)
+        val state = ApplyState(fileOps, live, previous, pDir, photoPre, lDir, logoPre)
 
         AppDatabase.closeAndClear()
         try {
-            if (previous.exists() && !previous.delete()) {
+            if (previous.exists() && !fileOps.delete(previous)) {
                 throw IllegalStateException("Gagal membersihkan cadangan database sebelumnya")
             }
             if (live.exists()) {
-                if (!live.renameTo(previous)) throw IllegalStateException("Gagal mengamankan database lama")
+                if (!fileOps.rename(live, previous)) throw IllegalStateException("Gagal mengamankan database lama")
                 state.dbBackedUp = true
             }
             wal.delete(); shm.delete()
 
             photoPre.deleteRecursively()
             if (pDir.exists()) {
-                if (!pDir.renameTo(photoPre)) throw IllegalStateException("Gagal mengamankan foto produk lama")
+                if (!fileOps.rename(pDir, photoPre)) throw IllegalStateException("Gagal mengamankan foto produk lama")
                 state.photoBackedUp = true
             }
             logoPre.deleteRecursively()
             if (lDir.exists()) {
-                if (!lDir.renameTo(logoPre)) throw IllegalStateException("Gagal mengamankan logo toko lama")
+                if (!fileOps.rename(lDir, logoPre)) throw IllegalStateException("Gagal mengamankan logo toko lama")
                 state.logoBackedUp = true
             }
 
-            if (!content.dbFile.renameTo(live)) throw IllegalStateException("Gagal menerapkan database restore")
+            if (!fileOps.rename(content.dbFile, live)) throw IllegalStateException("Gagal menerapkan database restore")
             state.newDbApplied = true
 
             val stagedPhotos = File(stagingDir, BackupPackage.PHOTO_DIR)
             val stagedLogos = File(stagingDir, BackupPackage.LOGO_DIR)
             if (stagedPhotos.exists()) {
-                if (!stagedPhotos.renameTo(pDir)) throw IllegalStateException("Gagal menerapkan foto produk")
+                if (!fileOps.rename(stagedPhotos, pDir)) throw IllegalStateException("Gagal menerapkan foto produk")
                 state.newPhotosApplied = true
             }
             if (stagedLogos.exists()) {
-                if (!stagedLogos.renameTo(lDir)) throw IllegalStateException("Gagal menerapkan logo toko")
+                if (!fileOps.rename(stagedLogos, lDir)) throw IllegalStateException("Gagal menerapkan logo toko")
                 state.newLogosApplied = true
             }
 
@@ -372,6 +397,7 @@ class BackupService(private val context: Context) {
      * The legacy path replaces only the database, so the media arguments are optional.
      */
     private class ApplyState(
+        private val ops: FileOps,
         private val live: File,
         private val previous: File,
         private val photoDir: File? = null,
@@ -397,11 +423,11 @@ class BackupService(private val context: Context) {
             val failed = mutableListOf<String>()
 
             // ---- database ----
-            if (newDbApplied && live.exists() && !live.delete()) {
+            if (newDbApplied && live.exists() && !ops.delete(live)) {
                 failed += "database hasil restore tidak dapat dihapus"
             }
             if (dbBackedUp) {
-                if (live.exists() || !previous.renameTo(live)) {
+                if (live.exists() || !ops.rename(previous, live)) {
                     failed += "database lama tidak dapat dikembalikan"
                 }
             }
@@ -409,11 +435,11 @@ class BackupService(private val context: Context) {
 
             // ---- product photos ----
             if (photoDir != null && photoPre != null) {
-                if (newPhotosApplied && photoDir.exists() && !photoDir.deleteRecursively()) {
+                if (newPhotosApplied && photoDir.exists() && !ops.deleteRecursively(photoDir)) {
                     failed += "foto produk hasil restore tidak dapat dihapus"
                 }
                 if (photoBackedUp) {
-                    if (photoDir.exists() || !photoPre.renameTo(photoDir)) {
+                    if (photoDir.exists() || !ops.rename(photoPre, photoDir)) {
                         failed += "foto produk lama tidak dapat dikembalikan"
                     }
                 }
@@ -421,11 +447,11 @@ class BackupService(private val context: Context) {
 
             // ---- store media ----
             if (logoDir != null && logoPre != null) {
-                if (newLogosApplied && logoDir.exists() && !logoDir.deleteRecursively()) {
+                if (newLogosApplied && logoDir.exists() && !ops.deleteRecursively(logoDir)) {
                     failed += "logo toko hasil restore tidak dapat dihapus"
                 }
                 if (logoBackedUp) {
-                    if (logoDir.exists() || !logoPre.renameTo(logoDir)) {
+                    if (logoDir.exists() || !ops.rename(logoPre, logoDir)) {
                         failed += "logo toko lama tidak dapat dikembalikan"
                     }
                 }
